@@ -1,0 +1,521 @@
+{
+  "info": {
+    "name": "Digilux — Alexa App-to-App Account Linking",
+    "description": "API collection for the Alexa App-to-App Account Linking feature.\n\nFlow:\n  1. POST  /api/v1/alexa/startAppToApp      → get state + codeChallenge\n  2. (User opens Alexa app, approves consent)\n  3. POST  /api/v1/alexa/completeAppToApp   → exchange code, enable skill\n  4. DELETE /api/v1/alexa/unlink            → revoke + unlink (when needed)\n\nVariables required:\n  - base_url        : API Gateway base URL\n  - cognito_token   : Cognito access token from app login\n  - alexa_code      : Authorization code extracted from deep link callback (step 3 only)\n  - alexa_state     : State value saved from startAppToApp response (step 3 only)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod",
+      "type": "string",
+      "description": "API Gateway base URL"
+    },
+    {
+      "key": "cognito_token",
+      "value": "PASTE_YOUR_COGNITO_ACCESS_TOKEN_HERE",
+      "type": "string",
+      "description": "Cognito access token from login. Replace with a real token before running."
+    },
+    {
+      "key": "alexa_state",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated from startAppToApp response. Do not edit manually."
+    },
+    {
+      "key": "alexa_code",
+      "value": "PASTE_AUTH_CODE_FROM_DEEP_LINK_HERE",
+      "type": "string",
+      "description": "Authorization code extracted from the deep link after Alexa consent. e.g. ANKkDFxyz..."
+    }
+  ],
+  "item": [
+    {
+      "name": "Linking Flow",
+      "description": "Run these in order: Step 1 → (user approves in Alexa) → Step 2",
+      "item": [
+        {
+          "name": "Step 1 — Start Account Linking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response has state', () => pm.expect(res).to.have.property('state'));",
+                  "pm.test('Response has codeChallenge', () => pm.expect(res).to.have.property('codeChallenge'));",
+                  "pm.test('Response has redirectUri', () => pm.expect(res).to.have.property('redirectUri'));",
+                  "pm.test('state is UUID4 format', () => {",
+                  "  pm.expect(res.state).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);",
+                  "});",
+                  "pm.test('codeChallenge is base64url (43 chars)', () => {",
+                  "  pm.expect(res.codeChallenge).to.have.lengthOf(43);",
+                  "});",
+                  "pm.test('redirectUri uses HTTPS', () => {",
+                  "  pm.expect(res.redirectUri).to.match(/^https:\\/\\//);",
+                  "});",
+                  "",
+                  "// Auto-save state for use in Step 2",
+                  "if (res.state) {",
+                  "  pm.collectionVariables.set('alexa_state', res.state);",
+                  "  console.log('✅ Saved alexa_state:', res.state);",
+                  "  console.log('');",
+                  "  console.log('NEXT STEPS:');",
+                  "  console.log('  1. Build the Alexa companion URL (see API Sequence Guide)');",
+                  "  console.log('  2. Open it — user approves consent in Alexa app');",
+                  "  console.log('  3. Extract code + state from the deep link callback');",
+                  "  console.log('  4. Paste the code into the alexa_code collection variable');",
+                  "  console.log('  5. Run Step 2 — Complete Account Linking');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/startAppToApp",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "startAppToApp"]
+            },
+            "description": "Initialises a linking session. Generates a state (CSRF token) and PKCE pair server-side. Returns the values the Flutter app needs to build the Alexa companion URL.\n\n**No request body required.**\n\nThe `state` value is auto-saved to the `alexa_state` collection variable by the test script."
+          },
+          "response": [
+            {
+              "name": "200 OK — Session Created",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"state\": \"a3f2c1d0-e4b5-4678-9abc-def012345678\",\n    \"codeChallenge\": \"nLyVoqHFjLnz2hO_0tRq5c5wBpHCeFAB8Ys9t6XQTXM\",\n    \"redirectUri\": \"https://www.digilux.co.in/alexa/callback\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/startAppToApp"}
+              }
+            },
+            {
+              "name": "401 Unauthorized",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Unauthorized\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/startAppToApp"}
+              }
+            },
+            {
+              "name": "429 Too Many Sessions",
+              "status": "Too Many Requests",
+              "code": 429,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Too many pending sessions. Please wait and try again.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/startAppToApp"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step 2 — Complete Account Linking",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const state = pm.collectionVariables.get('alexa_state');",
+                  "const code  = pm.collectionVariables.get('alexa_code');",
+                  "",
+                  "if (!state) {",
+                  "  console.warn('⚠️  alexa_state is empty. Run Step 1 first.');",
+                  "}",
+                  "if (!code || code === 'PASTE_AUTH_CODE_FROM_DEEP_LINK_HERE') {",
+                  "  console.warn('⚠️  alexa_code is not set. Paste the auth code from the deep link callback into the alexa_code collection variable.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('linked is true', () => pm.expect(res.linked).to.be.true);",
+                  "  console.log('✅ Account linking complete! User can now use Alexa voice commands.');",
+                  "  // Clear the one-time code",
+                  "  pm.collectionVariables.set('alexa_code', '');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token — must be the same user who called startAppToApp"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"code\": \"{{alexa_code}}\",\n    \"state\": \"{{alexa_state}}\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/completeAppToApp",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "completeAppToApp"]
+            },
+            "description": "Completes the linking session.\n\n**Prerequisites:**\n- `alexa_state` must be set (auto-saved by Step 1 test script)\n- `alexa_code` must be set manually — paste the `code` parameter extracted from the deep link\n\n**What the backend does:**\n1. Validates state (owner, expiry, single-use)\n2. Marks state as USED (replay protection)\n3. Exchanges auth code with Amazon LWA for access + refresh tokens\n4. Calls Alexa Skill Enablement API to activate the skill\n5. Stores encrypted tokens in DynamoDB\n6. Returns `{ \"linked\": true }`"
+          },
+          "response": [
+            {
+              "name": "200 OK — Linked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": true\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"code\": \"ANKkDFxyz...\",\n    \"state\": \"a3f2c1d0-e4b5-4678-9abc-def012345678\"\n}"
+                },
+                "url": {"raw": "{{base_url}}/api/v1/alexa/completeAppToApp"}
+              }
+            },
+            {
+              "name": "400 — Session Expired",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Linking session expired — please start again\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"code\":\"...\",\"state\":\"...\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/alexa/completeAppToApp"}
+              }
+            },
+            {
+              "name": "400 — Session Already Used",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Session already used\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"code\":\"...\",\"state\":\"...\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/alexa/completeAppToApp"}
+              }
+            },
+            {
+              "name": "400 — Invalid State",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Invalid state\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"code\":\"...\",\"state\":\"wrong-state\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/alexa/completeAppToApp"}
+              }
+            },
+            {
+              "name": "502 — Amazon Token Exchange Failed",
+              "status": "Bad Gateway",
+              "code": 502,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Failed to complete Alexa account linking\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"code\":\"...\",\"state\":\"...\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/alexa/completeAppToApp"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Callback (Browser Fallback)",
+      "description": "Public endpoint — no auth. Fired by the browser when Android App Links are not configured. Normally the OS intercepts the redirect and this Lambda never fires.",
+      "item": [
+        {
+          "name": "Callback — Success (browser fallback)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/alexa/callback?code=ANKkDFxyz123&state=a3f2c1d0-e4b5-4678-9abc-def012345678",
+              "host": ["{{base_url}}"],
+              "path": ["alexa", "callback"],
+              "query": [
+                {
+                  "key": "code",
+                  "value": "ANKkDFxyz123",
+                  "description": "Authorization code from Amazon"
+                },
+                {
+                  "key": "state",
+                  "value": "a3f2c1d0-e4b5-4678-9abc-def012345678",
+                  "description": "State value from startAppToApp"
+                }
+              ]
+            },
+            "description": "This is the OAuth redirect URI that Amazon calls after user approves consent. On Android with App Links configured, the OS intercepts this URL and opens the Flutter app directly — this Lambda never fires.\n\nIn the browser fallback case, this Lambda returns an HTML page that immediately tries to open `digilux://alexa/callback?code=...&state=...` and shows an 'Open Digilux App' button after 2 seconds."
+          },
+          "response": [
+            {
+              "name": "200 OK — HTML Deep-Link Page",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "text/html; charset=utf-8"}],
+              "body": "<!DOCTYPE html>\n<html>\n  <!-- HTML page that redirects to digilux://alexa/callback?code=...&state=... -->\n  <!-- window.location.href fires immediately; button shown after 2s as fallback -->\n</html>"
+            }
+          ]
+        },
+        {
+          "name": "Callback — User Denied Consent",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/alexa/callback?error=access_denied&error_description=User+denied+the+request",
+              "host": ["{{base_url}}"],
+              "path": ["alexa", "callback"],
+              "query": [
+                {
+                  "key": "error",
+                  "value": "access_denied",
+                  "description": "Error code from Amazon"
+                },
+                {
+                  "key": "error_description",
+                  "value": "User denied the request",
+                  "description": "Human-readable error description"
+                }
+              ]
+            },
+            "description": "Amazon redirects here with `?error=access_denied` when the user taps Deny on the consent screen. Returns a user-friendly HTML error page with a 'Return to App' button."
+          },
+          "response": [
+            {
+              "name": "200 OK — HTML Error Page",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "text/html; charset=utf-8"}],
+              "body": "<!DOCTYPE html>\n<html>\n  <!-- HTML error page: 'Linking Failed — User denied the request. Return to App.' -->\n</html>"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Unlink Flow",
+      "description": "Disconnects the user's Alexa account from Digilux.",
+      "item": [
+        {
+          "name": "Unlink Alexa Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200 or 404', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 404]);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('unlinked is true', () => {",
+                  "    pm.expect(pm.response.json().unlinked).to.be.true;",
+                  "  });",
+                  "  console.log('✅ Alexa account unlinked successfully.');",
+                  "}",
+                  "",
+                  "if (pm.response.code === 404) {",
+                  "  console.log('ℹ️  No linked account found — user was already unlinked.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/unlink",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "unlink"]
+            },
+            "description": "Unlinks the authenticated user's Alexa account.\n\n**No request body required.**\n\n**What the backend does (in order):**\n1. Looks up stored LWA tokens for this user\n2. Calls Alexa Skill Disablement API (best-effort — failure does not block unlink)\n3. Calls Amazon LWA token revocation endpoint (best-effort — failure does not block unlink)\n4. Deletes the token record from DynamoDB\n5. Returns `{ \"unlinked\": true }`\n\nIf the user was not linked (404), no action is taken — safe to call idempotently."
+          },
+          "response": [
+            {
+              "name": "200 OK — Unlinked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"unlinked\": true\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/unlink"}
+              }
+            },
+            {
+              "name": "404 — Not Linked",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"No linked Alexa account found for this user\"\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/unlink"}
+              }
+            },
+            {
+              "name": "401 Unauthorized",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Unauthorized\"\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/unlink"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Error Scenarios",
+      "description": "Requests that demonstrate specific error responses. Useful for testing error handling on the client side.",
+      "item": [
+        {
+          "name": "Start — No Auth Header → 401",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/startAppToApp",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "startAppToApp"]
+            },
+            "description": "Omits the Authorization header entirely. Expect 401."
+          },
+          "response": []
+        },
+        {
+          "name": "Complete — Expired / Wrong State → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{cognito_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"code\": \"ANKkDFxyz123\",\n    \"state\": \"00000000-0000-4000-8000-000000000000\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/completeAppToApp",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "completeAppToApp"]
+            },
+            "description": "Uses a valid UUID4 format but a state that doesn't exist in DynamoDB. Expect 400 `Invalid state`."
+          },
+          "response": []
+        },
+        {
+          "name": "Complete — Invalid State Format → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{cognito_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"code\": \"ANKkDFxyz123\",\n    \"state\": \"not-a-valid-uuid\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/completeAppToApp",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "completeAppToApp"]
+            },
+            "description": "State is not a valid UUID4. Expect 400 `Invalid state format` — rejected before even hitting DynamoDB."
+          },
+          "response": []
+        },
+        {
+          "name": "Complete — Missing code → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{cognito_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"state\": \"a3f2c1d0-e4b5-4678-9abc-def012345678\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/completeAppToApp",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "completeAppToApp"]
+            },
+            "description": "Missing the `code` field. Expect 400 `code is required`."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
