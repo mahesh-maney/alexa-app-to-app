@@ -92,9 +92,6 @@ _REQUIRED_VARS = {
     "LWA_SECRET_ARN":      _LWA_SECRET_ARN,
     "LWA_SECRET_REGION":   _LWA_SECRET_REGION,
     "LWA_TOKEN_URL":       _LWA_TOKEN_URL,
-    "ALEXA_SKILL_ID":      _ALEXA_SKILL_ID,
-    "ALEXA_SKILL_STAGE":   _ALEXA_SKILL_STAGE,
-    "SKILL_ENABLEMENT_URL": _SKILL_ENABLEMENT_URL,
 }
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
 if _missing_vars:
@@ -102,6 +99,9 @@ if _missing_vars:
                  "invocations will return HTTP 500", _missing_vars)
 
 # ── Startup security warnings ──────────────────────────────────────────────────
+if not _ALEXA_SKILL_ID or not _SKILL_ENABLEMENT_URL:
+    logger.warning("SECURITY_WARNING ALEXA_SKILL_ID or SKILL_ENABLEMENT_URL not set — "
+                   "skill enablement step will be SKIPPED (set for production)")
 if not _COGNITO_USER_POOL_ID:
     logger.warning("SECURITY_WARNING COGNITO_USER_POOL_ID not set — "
                    "JWT signature verification DISABLED (set for production)")
@@ -458,20 +458,24 @@ def lambda_handler(event, context):  # noqa: ANN001
     )
 
     # ── 6. Enable the Alexa skill for this user ───────────────────────────────
-    logger.info("SKILL_ENABLE userId=%s skill_id=%s stage=%s request_id=%s",
-                user_id, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, request_id)
-    try:
-        _enable_alexa_skill(access_token)
-    except RuntimeError as exc:
-        logger.error("SKILL_ENABLE_FAILED userId=%s skill_id=%s error=%s request_id=%s",
-                     user_id, _ALEXA_SKILL_ID, exc, request_id)
-        return _resp(502, {"error": "Failed to enable Alexa skill"})
+    if not _ALEXA_SKILL_ID or not _SKILL_ENABLEMENT_URL:
+        logger.warning("SKILL_ENABLE_SKIPPED ALEXA_SKILL_ID or SKILL_ENABLEMENT_URL not configured "
+                       "userId=%s request_id=%s", user_id, request_id)
+    else:
+        logger.info("SKILL_ENABLE userId=%s skill_id=%s stage=%s request_id=%s",
+                    user_id, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, request_id)
+        try:
+            _enable_alexa_skill(access_token)
+        except RuntimeError as exc:
+            logger.error("SKILL_ENABLE_FAILED userId=%s skill_id=%s error=%s request_id=%s",
+                         user_id, _ALEXA_SKILL_ID, exc, request_id)
+            return _resp(502, {"error": "Failed to enable Alexa skill"})
 
-    # AUDIT — skill enabled for user
-    logger.info(
-        "[AUDIT] SKILL_ENABLED userId=%s skill_id=%s stage=%s request_id=%s",
-        user_id, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, request_id,
-    )
+        # AUDIT — skill enabled for user
+        logger.info(
+            "[AUDIT] SKILL_ENABLED userId=%s skill_id=%s stage=%s request_id=%s",
+            user_id, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, request_id,
+        )
 
     # ── 7. Store tokens in LWA table ──────────────────────────────────────────
     linked_at = int(time.time())
