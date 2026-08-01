@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets — never commit
+.env
+*.env
+secrets.json
+
+# Lambda deployment packages
+lambdas/*/package/
+lambdas/*/*.zip
+/tmp/*.zip
+
+# macOS
+.DS_Store
