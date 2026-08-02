@@ -13,9 +13,9 @@
     },
     {
       "key": "cognito_token",
-      "value": "PASTE_YOUR_COGNITO_ACCESS_TOKEN_HERE",
+      "value": "PASTE_YOUR_COGNITO_ID_TOKEN_HERE",
       "type": "string",
-      "description": "Cognito access token from login. Replace with a real token before running."
+      "description": "Cognito ID token from login (AuthenticationResult.IdToken — NOT the access token). Replace with a real token before running."
     },
     {
       "key": "alexa_state",
@@ -259,6 +259,19 @@
               "code": 502,
               "header": [{"key": "Content-Type", "value": "application/json"}],
               "body": "{\n    \"error\": \"Failed to complete Alexa account linking\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"code\":\"...\",\"state\":\"...\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/alexa/completeAppToApp"}
+              }
+            },
+            {
+              "name": "502 — Alexa Skill Enablement Failed",
+              "status": "Bad Gateway",
+              "code": 502,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Failed to enable Alexa skill\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "header": [{"key": "Authorization", "value": "Bearer <token>"}],
@@ -570,6 +583,20 @@
               "path": ["api", "v1", "alexa", "completeAppToApp"]
             },
             "description": "State is not a valid UUID4. Expect 400 `Invalid state format` — rejected before even hitting DynamoDB."
+          },
+          "response": []
+        },
+        {
+          "name": "Unlink — No Auth Header → 401",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/unlink",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "unlink"]
+            },
+            "description": "Omits the Authorization header entirely. Expect 401."
           },
           "response": []
         },
