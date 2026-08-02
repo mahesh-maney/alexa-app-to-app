@@ -1,6 +1,6 @@
 # Alexa App-to-App — API Sequence Guide
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-08-02
 **Purpose:** Explains which APIs to call, in what order, with what parameters, and what to expect back. Use this alongside the Postman collection.
 
@@ -16,7 +16,7 @@ https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod
 
 ## Prerequisites
 
-Before calling any API you need a **Cognito access token**. This is the token issued when the user logs into the Digilux app. It is a JWT that looks like:
+Before calling any API you need a **Cognito ID token**. This is the ID token issued when the user logs into the Digilux app (not the access token). It is a JWT that looks like:
 
 ```
 eyJraWQiOiJY....<long base64 string>
@@ -24,8 +24,10 @@ eyJraWQiOiJY....<long base64 string>
 
 Pass it in every authenticated request as:
 ```
-Authorization: Bearer <cognito_access_token>
+Authorization: Bearer <cognito_id_token>
 ```
+
+> **Important:** The API Gateway authorizer validates the **ID token**, not the access token. Make sure your app passes `AuthenticationResult.IdToken` from Cognito, not `AuthenticationResult.AccessToken`.
 
 ---
 
@@ -202,14 +204,81 @@ This is the only field in the response. When you see `linked: true`, account lin
 
 ---
 
-## Flow 2 — Unlink Alexa Account
+## Flow 2 — Check Linking Status
+
+Use this to show the correct connected/disconnected state in your app UI. Call it on the settings screen load, or after completing the linking flow to confirm success.
+
+```
+Your App          Digilux Backend
+   |                    |
+   |── API Call 3 ─────>|
+   |                    |── DDB get_item(userId)
+   |<── { linked: false }|   (or { linked: true, linkedAt: ... })
+```
+
+---
+
+### API Call 3 — Get Linking Status
+
+**When to call:** On app settings screen load, or any time you need to know if the user has Alexa linked.
+
+```
+GET /api/v1/alexa/status
+Authorization: Bearer <cognito_id_token>
+```
+
+**Request body:** None
+
+**Example request:**
+
+```
+GET https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod/api/v1/alexa/status
+Authorization: Bearer eyJraWQiOiJY...
+```
+
+---
+
+**Expected response — 200 OK (not linked):**
+
+```json
+{
+    "linked": false
+}
+```
+
+**Expected response — 200 OK (linked):**
+
+```json
+{
+    "linked": true,
+    "linkedAt": 1700000000
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `linked` | boolean | `true` if the user has an active Alexa account link, `false` otherwise |
+| `linkedAt` | number (epoch seconds) | Unix timestamp of when the account was linked. Only present when `linked` is `true`. |
+
+---
+
+**Possible error responses:**
+
+| HTTP | Body | What it means | What to do |
+|------|------|---------------|-----------|
+| 401 | `{"error": "Unauthorized"}` | Token missing or expired | Re-authenticate the user |
+| 500 | `{"error": "Server configuration error"}` | Backend misconfiguration | Contact backend team |
+
+---
+
+## Flow 3 — Unlink Alexa Account
 
 This is a single API call. Use it when the user taps "Disconnect Alexa".
 
 ```
 Your App          Digilux Backend          Amazon
    |                    |                    |
-   |── API Call 3 ─────>|                    |
+   |── API Call 4 ─────>|                    |
    |                    |── disable skill ──>| (best-effort)
    |                    |── revoke token ───>| (best-effort)
    |                    |── delete from DB   |
@@ -218,7 +287,7 @@ Your App          Digilux Backend          Amazon
 
 ---
 
-### API Call 3 — Unlink Account
+### API Call 4 — Unlink Account
 
 **When to call:** When the user taps "Disconnect Alexa" in app settings.
 
@@ -259,7 +328,7 @@ Account is unlinked. Update your UI to show "Not connected".
 
 ---
 
-## Flow 3 — Callback (for testing only)
+## Flow 4 — Callback (for testing only)
 
 The callback endpoint is public (no auth). It is the OAuth redirect URI that Amazon calls after the user approves consent. In production, Android App Links intercepts this URL before the browser loads it, so this Lambda never fires for Android users.
 
@@ -295,9 +364,10 @@ Response: `200 OK` HTML error page with "Linking Failed" message and "Return to 
 
 | # | Method | Path | Auth | Body | Success |
 |---|--------|------|------|------|---------|
-| 1 | POST | `/api/v1/alexa/startAppToApp` | Cognito Bearer | None | `200 {state, codeChallenge, redirectUri}` |
-| 2 | POST | `/api/v1/alexa/completeAppToApp` | Cognito Bearer | `{code, state}` | `200 {linked: true}` |
-| 3 | DELETE | `/api/v1/alexa/unlink` | Cognito Bearer | None | `200 {unlinked: true}` |
+| 1 | POST | `/api/v1/alexa/startAppToApp` | Cognito ID token | None | `200 {state, codeChallenge, redirectUri}` |
+| 2 | POST | `/api/v1/alexa/completeAppToApp` | Cognito ID token | `{code, state}` | `200 {linked: true}` |
+| 3 | GET | `/api/v1/alexa/status` | Cognito ID token | None | `200 {linked: bool, linkedAt?: number}` |
+| 4 | DELETE | `/api/v1/alexa/unlink` | Cognito ID token | None | `200 {unlinked: true}` |
 | — | GET | `/alexa/callback` | None (public) | Query params | `200 HTML` |
 
 ---
@@ -307,23 +377,29 @@ Response: `200 OK` HTML error page with "Linking Failed" message and "Return to 
 1. Open Postman → Import → select `Digilux_Alexa_App_to_App.postman_collection.json`
 
 2. In the collection, go to **Variables** tab and set:
-   - `cognito_token` — paste a valid Cognito access token
+   - `cognito_token` — paste a valid Cognito **ID token** (`AuthenticationResult.IdToken`)
    - `base_url` — already set to the production API Gateway URL
 
-3. Run **Step 1 — Start Account Linking**
+3. Run **Step 3 — Check Linking Status** first to confirm the user's current state
+   - Expect `{"linked": false}` for a fresh user
+
+4. Run **Step 1 — Start Account Linking**
    - The test script automatically saves the `state` to `alexa_state` collection variable
 
-4. Build the Alexa companion URL using the response values and open it in a browser or the Alexa app
+5. Build the Alexa companion URL using the response values and open it in a browser or the Alexa app
 
-5. After approving, get the `code` from the redirect URL:
+6. After approving, get the `code` from the redirect URL:
    - The URL will be `https://www.digilux.co.in/alexa/callback?code=...&state=...`
    - Copy the `code` value and paste it into the `alexa_code` collection variable
 
-6. Run **Step 2 — Complete Account Linking**
-   - `alexa_state` is already set from step 3
+7. Run **Step 2 — Complete Account Linking**
+   - `alexa_state` is already set from step 4
    - `alexa_code` uses what you just pasted
 
-7. Expect `{"linked": true}`
+8. Expect `{"linked": true}`
+
+9. Run **Step 3 — Check Linking Status** again to confirm
+   - Expect `{"linked": true, "linkedAt": <timestamp>}`
 
 ---
 
@@ -369,8 +445,10 @@ Already Used           │ status: USED  │  ← Atomic update
 
 | Mistake | Result | Fix |
 |---------|--------|-----|
+| Using the **access token** instead of the **ID token** | 401 `Unauthorized` | Pass `AuthenticationResult.IdToken`, not `AccessToken` |
 | Using same `state` for a second link attempt | 400 `Session already used` | Always call `startAppToApp` fresh for each link attempt |
 | Waiting more than 10 minutes before `completeAppToApp` | 400 `Linking session expired` | Call `startAppToApp` again |
 | Sending a different Cognito token in `completeAppToApp` than in `startAppToApp` | 400 `Invalid state` | Use the same logged-in user for both calls |
 | Not verifying state in deep link matches stored state | Security risk | Always compare `state` from deep link with `state` from API Call 1 |
 | Calling `completeAppToApp` with the same `code` after a 502 | 400 `Session already used` | The state was already consumed; restart from `startAppToApp` |
+| Not calling `status` after linking to confirm success | UI shows wrong state | Always call `GET /status` after `completeAppToApp` to drive your UI |
