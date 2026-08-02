@@ -7,7 +7,7 @@
   "variable": [
     {
       "key": "base_url",
-      "value": "https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod",
+      "value": "https://iot.digilux.co.in/smarthome",
       "type": "string",
       "description": "API Gateway base URL"
     },

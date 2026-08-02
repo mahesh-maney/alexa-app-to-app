@@ -1,6 +1,6 @@
 # Alexa App-to-App — API Sequence Guide
 
-**Version:** 1.1
+**Version:** 1.2
 **Date:** 2026-08-02
 **Purpose:** Explains which APIs to call, in what order, with what parameters, and what to expect back. Use this alongside the Postman collection.
 
@@ -9,7 +9,7 @@
 ## Base URL
 
 ```
-https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod
+https://iot.digilux.co.in/smarthome
 ```
 
 ---
@@ -69,7 +69,7 @@ Authorization: Bearer <cognito_access_token>
 
 **Example request:**
 ```
-POST https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod/api/v1/alexa/startAppToApp
+POST https://iot.digilux.co.in/smarthome/api/v1/alexa/startAppToApp
 Authorization: Bearer eyJraWQiOiJY...
 ```
 
@@ -164,7 +164,7 @@ Content-Type: application/json
 **Example request:**
 
 ```
-POST https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod/api/v1/alexa/completeAppToApp
+POST https://iot.digilux.co.in/smarthome/api/v1/alexa/completeAppToApp
 Authorization: Bearer eyJraWQiOiJY...
 Content-Type: application/json
 
@@ -232,7 +232,7 @@ Authorization: Bearer <cognito_id_token>
 **Example request:**
 
 ```
-GET https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod/api/v1/alexa/status
+GET https://iot.digilux.co.in/smarthome/api/v1/alexa/status
 Authorization: Bearer eyJraWQiOiJY...
 ```
 
@@ -301,7 +301,7 @@ Authorization: Bearer <cognito_access_token>
 **Example request:**
 
 ```
-DELETE https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod/api/v1/alexa/unlink
+DELETE https://iot.digilux.co.in/smarthome/api/v1/alexa/unlink
 Authorization: Bearer eyJraWQiOiJY...
 ```
 
@@ -343,7 +343,7 @@ GET /alexa/callback?code=AUTH_CODE&state=STATE
 **Success case — redirects to deep link:**
 
 ```
-GET https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod/alexa/callback
+GET https://iot.digilux.co.in/smarthome/alexa/callback
   ?code=ANKkDFxyz123
   &state=a3f2c1d0-e4b5-4678-9abc-def012345678
 ```
