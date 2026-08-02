@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Digilux — Alexa App-to-App Account Linking",
-    "description": "API collection for the Alexa App-to-App Account Linking feature.\n\nFlow:\n  1. POST  /api/v1/alexa/startAppToApp      → get state + codeChallenge\n  2. (User opens Alexa app, approves consent)\n  3. POST  /api/v1/alexa/completeAppToApp   → exchange code, enable skill\n  4. DELETE /api/v1/alexa/unlink            → revoke + unlink (when needed)\n\nVariables required:\n  - base_url        : API Gateway base URL\n  - cognito_token   : Cognito access token from app login\n  - alexa_code      : Authorization code extracted from deep link callback (step 3 only)\n  - alexa_state     : State value saved from startAppToApp response (step 3 only)",
+    "description": "API collection for the Alexa App-to-App Account Linking feature.\n\nFlow:\n  1. POST   /api/v1/alexa/startAppToApp      → get state + codeChallenge\n  2. (User opens Alexa app, approves consent)\n  3. POST   /api/v1/alexa/completeAppToApp   → exchange code, enable skill\n  4. GET    /api/v1/alexa/status             → check if user is linked or not\n  5. DELETE /api/v1/alexa/unlink             → revoke + unlink (when needed)\n\nVariables required:\n  - base_url        : API Gateway base URL\n  - cognito_token   : Cognito ID token from app login\n  - alexa_code      : Authorization code extracted from deep link callback (step 3 only)\n  - alexa_state     : State value saved from startAppToApp response (step 3 only)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -267,6 +267,86 @@
               }
             }
           ]
+        },
+        {
+          "name": "Step 3 — Check Linking Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const res = pm.response.json();",
+                  "pm.test('Response has linked field', () => pm.expect(res).to.have.property('linked'));",
+                  "pm.test('linked is a boolean', () => pm.expect(res.linked).to.be.a('boolean'));",
+                  "",
+                  "if (res.linked) {",
+                  "  pm.test('linkedAt is present when linked', () => pm.expect(res).to.have.property('linkedAt'));",
+                  "  pm.test('linkedAt is a number (epoch seconds)', () => pm.expect(res.linkedAt).to.be.a('number'));",
+                  "  console.log('✅ User is LINKED. linkedAt:', new Date(res.linkedAt * 1000).toISOString());",
+                  "} else {",
+                  "  console.log('ℹ️  User is NOT LINKED. Run Step 1 and Step 2 to link.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito ID token"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "status"]
+            },
+            "description": "Returns whether the authenticated user has a linked Alexa account.\n\n**No request body required.**\n\nCall this on app startup or on the settings screen to show the correct connected/disconnected state.\n\n**Responses:**\n- `{ \"linked\": false }` — user has not linked Alexa yet\n- `{ \"linked\": true, \"linkedAt\": 1700000000 }` — user has an active link; `linkedAt` is a Unix epoch timestamp (seconds)"
+          },
+          "response": [
+            {
+              "name": "200 OK — Not Linked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": false\n}",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/status"}
+              }
+            },
+            {
+              "name": "200 OK — Linked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": true,\n    \"linkedAt\": 1700000000\n}",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/status"}
+              }
+            },
+            {
+              "name": "401 Unauthorized",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Unauthorized\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {"raw": "{{base_url}}/api/v1/alexa/status"}
+              }
+            }
+          ]
         }
       ]
     },
@@ -490,6 +570,20 @@
               "path": ["api", "v1", "alexa", "completeAppToApp"]
             },
             "description": "State is not a valid UUID4. Expect 400 `Invalid state format` — rejected before even hitting DynamoDB."
+          },
+          "response": []
+        },
+        {
+          "name": "Status — No Auth Header → 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/alexa/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "alexa", "status"]
+            },
+            "description": "Omits the Authorization header entirely. Expect 401."
           },
           "response": []
         },
