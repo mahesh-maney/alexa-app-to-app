@@ -1,6 +1,6 @@
 ==================================================
  Digilux Alexa App-to-App — AWS Live Test Results
- Date       : 2026-08-03
+ Date       : 2026-08-03 (re-run after OAuth scope investigation)
  Environment: Production (ap-south-1)
  API Base   : https://iot.digilux.co.in/smarthome
  API Gateway: ds6nxf8ac5 (main Digilux account)
