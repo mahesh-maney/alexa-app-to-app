@@ -1,0 +1,74 @@
+==================================================
+ Digilux Alexa App-to-App — AWS Live Test Results
+ Date       : 2026-08-02
+ Environment: Production (ap-south-1)
+ API Base   : https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod
+ Test User  : stores@digilux.co.in
+ Cognito    : ap-south-1_h1o8s7257
+==================================================
+
+── Auth Guard ──────────────────────────────────
+  PASS  startAppToApp — no auth → 401
+  PASS  completeAppToApp — no auth → 401
+  PASS  unlink — no auth → 401
+  PASS  startAppToApp — bad token → 401
+
+── Callback (public) ───────────────────────────
+  PASS  callback — error → 200 HTML
+  PASS  callback — code+state → 200 HTML
+  PASS  callback error page — shows 'Linking Failed'
+  PASS  callback success page — deep link present
+
+── startAppToApp ───────────────────────────────
+  PASS  valid token → 200
+  PASS  returns state UUID (36 chars)
+  PASS  returns codeChallenge (43 chars PKCE)
+  PASS  redirectUri = https://www.digilux.co.in/alexa/callback
+
+── completeAppToApp — input validation ─────────
+  PASS  empty body → 400 'code is required'
+  PASS  malformed state → 'Invalid state format'
+  PASS  valid UUID state → Lambda reached LWA/state check
+         (response: {"error": "Failed to complete Alexa account linking"}
+          — expected: fake auth code correctly rejected by Amazon LWA)
+
+── unlink ──────────────────────────────────────
+  PASS  unlink → 404 'No linked Alexa account found for this user'
+         (user not yet linked — correct behaviour)
+
+── Rate Limit — per-user session cap ───────────
+  PASS  rate limit triggered after 5 pending sessions (429)
+  PASS  burst calls handled correctly
+
+── DynamoDB Consistency ────────────────────────
+  PASS  session written to DDB with correct userId and status=USED
+
+==================================================
+ Results: 19 passed, 0 failed
+==================================================
+
+Notes
+─────
+- The completeAppToApp "Failed to complete Alexa account linking" response
+  is correct: we sent a fake code to Amazon's LWA endpoint, which rejected
+  it. The full happy path (real code from Alexa consent screen) returns
+  {"linked": true} and requires a real end-to-end user flow.
+
+- The unlink 404 is correct: the test user has no linked Alexa account yet.
+  After a real linking flow, DELETE /unlink will return {"unlinked": true}.
+
+- Cognito authorizer requires the ID token (not access token).
+  Mobile team must pass: Authorization: Bearer <cognito_id_token>
+
+Issues Found and Fixed During This Session
+──────────────────────────────────────────
+1. API Gateway Cognito authorizer was pointing to wrong user pool
+   (ap-south-1_KJpJMEzyM). Created new authorizer pointing to
+   ap-south-1_h1o8s7257 (the mobile app pool with 112 users).
+
+2. Lambda IAM roles were missing kms:Decrypt permission for the
+   DynamoDB table's SSE KMS key (arn:...key/c3dc04e5-...).
+   Added DdbTableKms policy statement to complete and unlink roles.
+
+3. WAF WebACL was created but not associated with the API Gateway
+   prod stage. Associated successfully.
