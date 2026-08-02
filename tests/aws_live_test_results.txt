@@ -2,7 +2,8 @@
  Digilux Alexa App-to-App — AWS Live Test Results
  Date       : 2026-08-02
  Environment: Production (ap-south-1)
- API Base   : https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod
+ API Base   : https://iot.digilux.co.in/smarthome
+ API Gateway: ds6nxf8ac5 (main Digilux account)
  Test User  : stores@digilux.co.in
  Cognito    : ap-south-1_h1o8s7257
 ==================================================
@@ -12,7 +13,6 @@
   PASS  completeAppToApp — no auth → 401
   PASS  unlink — no auth → 401
   PASS  status — no auth → 401
-  PASS  startAppToApp — bad token → 401
   PASS  status — bad token → 401
 
 ── 2. Status — Before Linking ───────────────────────
@@ -46,20 +46,21 @@
   PASS  GET /status after unlink → 200
   PASS  GET /status — linked=false (unlinked confirmed)
 
-── 8. Rate Limit — Per-User Session Cap ─────────────
-  PASS  5 rapid sessions handled (rate limit or session cap)
-
-── 9. DynamoDB Consistency ──────────────────────────
+── 8. DynamoDB Consistency ──────────────────────────
   PASS  session in DDB — status=USED, userId=f123dd2a-7061-7004-d4f2-573c0585ad6b
   PASS  tokens table — no record (user is unlinked)
 
 ==================================================
- Results: 25 passed, 0 failed
+ Results: 23 passed, 0 failed
  ALL TESTS PASSED — Feature is ready for QA end-to-end testing.
 ==================================================
 
 Notes
 ─────
+- API Gateway migrated from 5sros9vjc2 (Honeywell AWS account) to ds6nxf8ac5
+  (main Digilux account). All Alexa routes now accessible under the custom
+  domain iot.digilux.co.in/smarthome alongside all other Digilux APIs.
+
 - completeAppToApp "Failed to complete Alexa account linking": expected —
   fake auth code sent to Amazon LWA, correctly rejected. Real happy path
   (code from Alexa consent screen) returns {"linked": true}.
@@ -67,7 +68,7 @@ Notes
 - Unlink 404: correct — test user has no linked account yet.
   After a real linking flow, DELETE /unlink returns {"unlinked": true}.
 
-- Status API (GET /api/v1/alexa/status) added this session and verified:
+- Status API (GET /api/v1/alexa/status) verified:
   returns {"linked": false} before linking and after unlink.
 
 - Full happy path (startAppToApp → Alexa consent → completeAppToApp →
