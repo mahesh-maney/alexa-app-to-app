@@ -1,6 +1,6 @@
 ==================================================
  Digilux Alexa App-to-App — AWS Live Test Results
- Date       : 2026-08-03 13:13 IST
+ Date       : 2026-08-03 20:00 IST
  Environment: Production (ap-south-1)
  API Base   : https://iot.digilux.co.in/smarthome
  API Gateway: ds6nxf8ac5 (main Digilux account)
@@ -16,27 +16,27 @@
   PASS  unlink — no auth → 401
 
 ── 2. Status — Before Linking ───────────────────────
-  PASS  GET /status — valid token → 200
+  PASS  GET /status → 200 with linked field
   PASS  GET /status — linked=false (user not yet linked)
 
 ── 3. Callback — Public Endpoint ────────────────────
-  PASS  callback — error param → HTML 200
-  PASS  callback — code+state → HTML 200
+  PASS  callback — error param → HTML error page
+  PASS  callback — code+state → HTML success page
   PASS  callback success — deep link has code
   PASS  callback success — Open Digilux App button
 
 ── 4. startAppToApp ─────────────────────────────────
-  PASS  startAppToApp — valid token → 200
+  PASS  startAppToApp → state field
   PASS  returns codeChallenge
   PASS  returns redirectUri
-  PASS  returns state UUID (36 chars)
-  PASS  returns codeChallenge (43 chars PKCE S256)
-  PASS  redirectUri = digilux.co.in/alexa/callback
+  PASS  state is UUID (36 chars)
+  PASS  codeChallenge is 43 chars (PKCE S256)
+  PASS  redirectUri = iot.digilux.co.in/smarthome/alexa/callback
 
 ── 5. completeAppToApp — Input Validation ───────────
   PASS  empty body → 'code is required'
   PASS  malformed state → 'Invalid state format'
-  PASS  valid UUID state → Lambda processed (LWA or state error)
+  PASS  valid UUID state → Lambda processed (LWA rejection expected)
          (response: {"error": "Failed to complete Alexa account linking"}
           — expected: fake auth code correctly rejected by Amazon LWA)
 
@@ -45,16 +45,19 @@
          (user not yet linked — correct behaviour)
 
 ── 7. Status — After Tests ──────────────────────────
-  PASS  GET /status after unlink → 200
-  PASS  GET /status — linked=false (unlinked confirmed)
+  PASS  GET /status — linked=false (confirmed)
 
 ── 8. DynamoDB Consistency ──────────────────────────
   PASS  session in DDB — status=USED
   PASS  tokens table — no record (user is unlinked)
 
+── 9. assetlinks.json ───────────────────────────────
+  PASS  assetlinks.json — live at iot.digilux.co.in/.well-known/assetlinks.json
+  PASS  assetlinks.json — correct SHA256 fingerprint (B2:F9:FD...)
+
 ==================================================
- Results: 24 passed, 0 failed
- ALL TESTS PASSED — Feature is ready for QA end-to-end testing.
+ Results: 26 passed, 0 failed
+ ALL TESTS PASSED
 ==================================================
 
 Notes
@@ -62,9 +65,42 @@ Notes
 - API Gateway: ds6nxf8ac5 (main Digilux account). All Alexa routes accessible
   under custom domain iot.digilux.co.in/smarthome.
 
-- Authorizer: Cognito USER_POOLS (ddhsbg) on pool ap-south-1_h1o8s7257.
-  Alexa routes accept ID tokens (AuthenticationResult.IdToken).
-  NO authorizationScopes set — adding scopes causes 401 (ID tokens carry no scopes).
+- Authorizer: Cognito USER_POOLS (fp1yfy) on pool ap-south-1_h1o8s7257.
+  No authorizationScopes set — authorizer accepts both ID tokens and access
+  tokens. Previous authorizer (ddhsbg) replaced due to stale JWKS cache.
+
+- Token type: Cognito ID token works (token_use: id). CLI-generated tokens
+  via USER_PASSWORD_AUTH are preferred for testing — they use an independent
+  session and are NOT revoked when the Flutter app user logs out.
+
+  Generate test token:
+    aws cognito-idp initiate-auth \
+      --auth-flow USER_PASSWORD_AUTH \
+      --client-id q7189jitfkk4ttesepkgls491 \
+      --auth-parameters USERNAME=stores@digilux.co.in,PASSWORD=Admin@1234 \
+      --region ap-south-1 \
+      --query 'AuthenticationResult.IdToken' --output text
+
+- Token revocation (important): Cognito revokes tokens via origin_jti when
+  the user logs out (RevokeToken). A revoked token returns 403 "Access Denied"
+  even if the JWT is not expired. Always use a fresh CLI token for testing.
+
+- Redirect URI: updated from www.digilux.co.in/alexa/callback to
+  iot.digilux.co.in/smarthome/alexa/callback. Lambda serves HTML callback
+  page directly — no web server needed.
+
+- Android App Links: assetlinks.json live at
+  https://iot.digilux.co.in/.well-known/assetlinks.json
+  Package: com.digiluxai.smarthomepro
+  SHA256:  B2:F9:FD:20:5D:1D:85:82:0C:D9:7B:32:28:06:70:1D:16:F1:BE:81:
+           BD:76:E3:85:87:C6:84:9F:CC:C5:A4:EC
+
+- iOS Universal Links: apple-app-site-association endpoint created at
+  iot.digilux.co.in/.well-known/apple-app-site-association — pending iOS
+  Team ID and Bundle ID from Flutter team.
+
+- Alexa Developer Console: redirect URL must be updated to
+  https://iot.digilux.co.in/smarthome/alexa/callback — pending access.
 
 - completeAppToApp "Failed to complete Alexa account linking": expected —
   fake auth code sent to Amazon LWA, correctly rejected. Real happy path
@@ -73,14 +109,8 @@ Notes
 - Unlink 404: correct — test user has no linked account yet.
   After a real linking flow, DELETE /unlink returns {"unlinked": true}.
 
-- Status API (GET /api/v1/alexa/status) verified:
-  returns {"linked": false} before linking and after unlink.
-
 - Full happy path (startAppToApp → Alexa consent → completeAppToApp →
   status → unlink → status) requires real Alexa account — manual QA only.
 
-- Token type: Cognito ID token required (not access token).
-  Pass AuthenticationResult.IdToken in Authorization header.
-
 - Rate limit: stored as RL#{userId} in alexa_app_linking_sessions table.
-  Clear by deleting RL#{userId} item + PENDING sessions before repeated test runs.
+  Clear by deleting RL#{userId} item + PENDING sessions before repeated runs.
