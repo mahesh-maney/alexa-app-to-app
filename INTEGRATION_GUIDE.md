@@ -1,7 +1,7 @@
 # Alexa App-to-App Account Linking — Integration Guide
 
-**Version:** 1.0
-**Date:** 2026-08-02
+**Version:** 1.1
+**Date:** 2026-08-03
 **Audience:** Flutter mobile team, backend leads
 
 ---
@@ -44,8 +44,8 @@ Flutter App                 Digilux Backend              Amazon (Alexa / LWA)
 | 1 | Flutter | Call `POST /startAppToApp` to initialize a linking session |
 | 2 | Flutter | Build the Alexa companion URL using the returned values |
 | 3 | Flutter | Open the Alexa app (or browser fallback) |
-| 4 | Amazon | User approves consent; Amazon redirects to `https://www.digilux.co.in/alexa/callback` |
-| 5 | OS / Browser | Android App Links intercepts the URL and opens the Digilux app via deep link |
+| 4 | Amazon | User approves consent; Amazon redirects to `https://iot.digilux.co.in/smarthome/alexa/callback` |
+| 5 | Lambda / Browser | Lambda serves an HTML page that immediately fires `digilux://alexa/callback?code=...&state=...` |
 | 6 | Flutter | Extract `code` and `state` from the deep link |
 | 7 | Flutter | Call `POST /completeAppToApp` with `code` and `state` |
 | 8 | Backend | Exchanges code with Amazon, enables Alexa skill, stores tokens |
@@ -55,7 +55,7 @@ Flutter App                 Digilux Backend              Amazon (Alexa / LWA)
 
 ## 3. API Endpoints
 
-**Base URL:** `https://5sros9vjc2.execute-api.ap-south-1.amazonaws.com/prod`
+**Base URL:** `https://iot.digilux.co.in/smarthome`
 
 All authenticated endpoints require the Cognito access token in the `Authorization` header:
 ```
@@ -82,7 +82,7 @@ No request body required.
 {
   "state":         "a3f2c1d0-e4b5-4678-9abc-def012345678",
   "codeChallenge": "nLyVoqHFjLnz2hO_0tRq5c5wBpHCeFAB8Ys9t6XQTXM",
-  "redirectUri":   "https://www.digilux.co.in/alexa/callback"
+  "redirectUri":   "https://iot.digilux.co.in/smarthome/alexa/callback"
 }
 ```
 
@@ -182,19 +182,7 @@ dependencies:
   url_launcher: ^6.2.0       # open Alexa app / browser
 ```
 
-Register the deep link scheme in `AndroidManifest.xml`:
-```xml
-<intent-filter android:autoVerify="true">
-  <action android:name="android.intent.action.VIEW" />
-  <category android:name="android.intent.category.DEFAULT" />
-  <category android:name="android.intent.category.BROWSABLE" />
-  <data android:scheme="https"
-        android:host="www.digilux.co.in"
-        android:pathPrefix="/alexa/callback" />
-</intent-filter>
-```
-
-Also add the custom scheme fallback:
+Register the `digilux://` custom scheme in `AndroidManifest.xml`:
 ```xml
 <intent-filter>
   <action android:name="android.intent.action.VIEW" />
@@ -203,6 +191,8 @@ Also add the custom scheme fallback:
   <data android:scheme="digilux" android:host="alexa" />
 </intent-filter>
 ```
+
+> **Note:** Android App Links (HTTPS scheme with `android:autoVerify`) are **not required**. The redirect URI now points directly to the Digilux Lambda (`iot.digilux.co.in/smarthome/alexa/callback`) which serves an HTML page that fires the `digilux://` custom scheme deep link. No `assetlinks.json` is needed.
 
 For iOS, add to `Info.plist`:
 ```xml
@@ -214,6 +204,8 @@ For iOS, add to `Info.plist`:
   </dict>
 </array>
 ```
+
+> **Note:** iOS Universal Links (which require `apple-app-site-association`) are **not required**. The same `digilux://` custom scheme handles the deep link on iOS — no server-side AASA file is needed.
 
 ---
 
@@ -294,10 +286,9 @@ Future<void> openAlexaLinking(AlexaStartResponse session) async {
 
 ### 4.4 Step 3 — Handle the Deep Link Callback
 
-Set up a listener for incoming deep links when the app returns to foreground. The OS will deliver either:
+Set up a listener for incoming deep links when the app returns to foreground. The OS will deliver:
 
-- `https://www.digilux.co.in/alexa/callback?code=AUTH_CODE&state=STATE` (Android App Links)
-- `digilux://alexa/callback?code=AUTH_CODE&state=STATE` (custom scheme fallback)
+- `digilux://alexa/callback?code=AUTH_CODE&state=STATE` (custom scheme — both Android and iOS)
 
 ```dart
 class AlexaLinkingService {
@@ -320,9 +311,8 @@ class AlexaLinkingService {
   Future<void> _handleDeepLink(Uri? uri) async {
     if (uri == null) return;
 
-    // Handle both App Links and custom scheme
-    final isCallback = (uri.host == 'www.digilux.co.in' && uri.path == '/alexa/callback')
-        || (uri.scheme == 'digilux' && uri.host == 'alexa' && uri.path == '/callback');
+    // Handle custom scheme deep link (digilux://alexa/callback)
+    final isCallback = uri.scheme == 'digilux' && uri.host == 'alexa' && uri.path == '/callback';
 
     if (!isCallback) return;
 
@@ -494,7 +484,7 @@ The following must be configured in the Alexa Developer Console before the flow 
 
 1. Under **Account Linking**, set the **Redirect URLs** to include:
    ```
-   https://www.digilux.co.in/alexa/callback
+   https://iot.digilux.co.in/smarthome/alexa/callback
    ```
 
 2. Set **Authorization Grant Type** to `Auth Code Grant`.
@@ -505,29 +495,23 @@ The following must be configured in the Alexa Developer Console before the flow 
 
 ---
 
-## 8. Android App Links — One-Time Setup
+## 8. Deep Link Setup Summary
 
-> This is a backend/infra task. Listed here so the mobile team knows what is needed.
+**No server-side files are needed.** The redirect URI (`https://iot.digilux.co.in/smarthome/alexa/callback`) points directly to the Digilux Lambda, which serves an HTML page that fires `window.location.href = "digilux://alexa/callback?code=...&state=..."`. Both Android and iOS receive the deep link via the custom `digilux://` scheme.
 
-For Android to intercept the redirect URL before the browser loads it, an `assetlinks.json` file must be hosted at:
+**What the mobile team needs to configure (one-time):**
 
-```
-https://www.digilux.co.in/.well-known/assetlinks.json
-```
+| Platform | What to add | Where |
+|----------|-------------|-------|
+| Android | `<intent-filter>` for `digilux://alexa` | `AndroidManifest.xml` (see section 4.1) |
+| iOS | `CFBundleURLTypes` with scheme `digilux` | `Info.plist` (see section 4.1) |
 
-Content:
-```json
-[{
-  "relation": ["delegate_permission/common.handle_all_urls"],
-  "target": {
-    "namespace": "android_app",
-    "package_name": "com.digilux.app",
-    "sha256_cert_fingerprints": ["<YOUR_RELEASE_KEYSTORE_SHA256>"]
-  }
-}]
-```
+**What is NOT needed:**
+- `assetlinks.json` at `www.digilux.co.in` (Android App Links) — **not required**
+- `apple-app-site-association` (iOS Universal Links) — **not required**
+- Any web server route at `www.digilux.co.in/alexa/callback` — **not required**
 
-Replace `<YOUR_RELEASE_KEYSTORE_SHA256>` with the fingerprint of your release signing certificate. Until this is deployed, the browser fallback page will open instead (which redirects to `digilux://alexa/callback`).
+The Lambda at `iot.digilux.co.in/smarthome/alexa/callback` handles everything. If the `digilux://` URI scheme is not registered in the app, the user will see the HTML fallback page in the browser with an "Open Digilux App" button that fires the same deep link.
 
 ---
 
@@ -545,7 +529,7 @@ Before marking the integration as complete, verify the following:
 - [ ] After unlinking, tapping "Connect Alexa" again completes the flow successfully
 - [ ] Expired session (wait 10+ minutes before completing) shows a clear error with "Try Again"
 - [ ] User denies consent in Alexa → app shows a user-friendly error
-- [ ] App handles the browser fallback correctly when Android App Links are not configured
+- [ ] App handles the browser fallback (HTML page with "Open Digilux App" button fires `digilux://` URI)
 
 ---
 
