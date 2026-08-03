@@ -1,6 +1,6 @@
 ==================================================
  Digilux Alexa App-to-App — AWS Live Test Results
- Date       : 2026-08-03 (re-run after OAuth scope investigation)
+ Date       : 2026-08-03 13:13 IST
  Environment: Production (ap-south-1)
  API Base   : https://iot.digilux.co.in/smarthome
  API Gateway: ds6nxf8ac5 (main Digilux account)
@@ -9,26 +9,28 @@
 ==================================================
 
 ── 1. Auth Guard (all 5 endpoints) ─────────────────
+  PASS  status — no auth → 401
+  PASS  status — bad token → 401
   PASS  startAppToApp — no auth → 401
   PASS  completeAppToApp — no auth → 401
   PASS  unlink — no auth → 401
-  PASS  status — no auth → 401
-  PASS  status — bad token → 401
 
 ── 2. Status — Before Linking ───────────────────────
   PASS  GET /status — valid token → 200
   PASS  GET /status — linked=false (user not yet linked)
 
 ── 3. Callback — Public Endpoint ────────────────────
-  PASS  callback — error param → 200
-  PASS  callback — code+state → 200
-  PASS  callback error page — 'Linking Failed'
-  PASS  callback success page — deep link present
+  PASS  callback — error param → HTML 200
+  PASS  callback — code+state → HTML 200
+  PASS  callback success — deep link has code
+  PASS  callback success — Open Digilux App button
 
 ── 4. startAppToApp ─────────────────────────────────
   PASS  startAppToApp — valid token → 200
+  PASS  returns codeChallenge
+  PASS  returns redirectUri
   PASS  returns state UUID (36 chars)
-  PASS  returns codeChallenge (43 chars PKCE)
+  PASS  returns codeChallenge (43 chars PKCE S256)
   PASS  redirectUri = digilux.co.in/alexa/callback
 
 ── 5. completeAppToApp — Input Validation ───────────
@@ -42,24 +44,27 @@
   PASS  unlink → 404: {"error": "No linked Alexa account found for this user"}
          (user not yet linked — correct behaviour)
 
-── 7. Status — After Unlink ─────────────────────────
+── 7. Status — After Tests ──────────────────────────
   PASS  GET /status after unlink → 200
   PASS  GET /status — linked=false (unlinked confirmed)
 
 ── 8. DynamoDB Consistency ──────────────────────────
-  PASS  session in DDB — status=USED, userId=f123dd2a-7061-7004-d4f2-573c0585ad6b
+  PASS  session in DDB — status=USED
   PASS  tokens table — no record (user is unlinked)
 
 ==================================================
- Results: 23 passed, 0 failed
+ Results: 24 passed, 0 failed
  ALL TESTS PASSED — Feature is ready for QA end-to-end testing.
 ==================================================
 
 Notes
 ─────
-- API Gateway migrated from 5sros9vjc2 (Honeywell AWS account) to ds6nxf8ac5
-  (main Digilux account). All Alexa routes now accessible under the custom
-  domain iot.digilux.co.in/smarthome alongside all other Digilux APIs.
+- API Gateway: ds6nxf8ac5 (main Digilux account). All Alexa routes accessible
+  under custom domain iot.digilux.co.in/smarthome.
+
+- Authorizer: Cognito USER_POOLS (ddhsbg) on pool ap-south-1_h1o8s7257.
+  Alexa routes accept ID tokens (AuthenticationResult.IdToken).
+  NO authorizationScopes set — adding scopes causes 401 (ID tokens carry no scopes).
 
 - completeAppToApp "Failed to complete Alexa account linking": expected —
   fake auth code sent to Amazon LWA, correctly rejected. Real happy path
@@ -76,3 +81,6 @@ Notes
 
 - Token type: Cognito ID token required (not access token).
   Pass AuthenticationResult.IdToken in Authorization header.
+
+- Rate limit: stored as RL#{userId} in alexa_app_linking_sessions table.
+  Clear by deleting RL#{userId} item + PENDING sessions before repeated test runs.
