@@ -17,16 +17,16 @@ Flow:
        POST https://api.amazon.com/auth/o2/token
          grant_type    = authorization_code
          code          = <from Flutter>
-         redirect_uri  = https://www.digilux.co.in/alexa/callback
+         redirect_uri  = https://iot.digilux.co.in/alexa/callback
          client_id     = <from Secrets Manager>
          client_secret = <from Secrets Manager>
          code_verifier = <from DynamoDB session>
-  6. Enable the Alexa skill for this user:
-       PUT https://api.amazonalexa.com/v1/users/~current/skills/{SKILL_ID}/enablement
-         Authorization: Bearer <access_token from step 5>
-         { "stage": "live" }
-  7. Store access_token + refresh_token in digilux_honeywell_alexa_lwa_tokens
-  8. Return { "linked": true }
+  6. Store access_token + refresh_token in digilux_honeywell_alexa_lwa_tokens
+  7. Return { "linked": true }
+
+Note: The Alexa skill is already enabled by the time this endpoint is called —
+the user went through the Alexa consent UI (App-to-App flow) which enables
+the skill automatically. No separate SMAPI enablement call is needed.
 
 Error responses:
   400 — invalid/expired/already-used state, missing fields
@@ -68,9 +68,7 @@ _REDIRECT_URI              = os.environ.get("REDIRECT_URI",               "")
 _LWA_SECRET_ARN            = os.environ.get("LWA_SECRET_ARN",             "")
 _LWA_SECRET_REGION         = os.environ.get("LWA_SECRET_REGION",          "")
 _LWA_TOKEN_URL             = os.environ.get("LWA_TOKEN_URL",              "")
-_ALEXA_SKILL_ID            = os.environ.get("ALEXA_SKILL_ID",             "")
-_ALEXA_SKILL_STAGE         = os.environ.get("ALEXA_SKILL_STAGE",          "")
-_SKILL_ENABLEMENT_URL      = os.environ.get("SKILL_ENABLEMENT_URL",       "")
+_ALEXA_SKILL_ID            = os.environ.get("ALEXA_SKILL_ID",             "")  # for audit logging only
 _LWA_HTTP_TIMEOUT          = int(os.environ.get("LWA_HTTP_TIMEOUT",            "10"))  # optional
 _TOKEN_EXPIRY_BUFFER_S     = int(os.environ.get("TOKEN_EXPIRY_BUFFER_SECONDS",  "60"))  # optional
 _KMS_KEY_ARN               = os.environ.get("KMS_KEY_ARN",                    "")
@@ -102,9 +100,6 @@ if _missing_vars:
                  "invocations will return HTTP 500", _missing_vars)
 
 # ── Startup security warnings ──────────────────────────────────────────────────
-if not _ALEXA_SKILL_ID or not _SKILL_ENABLEMENT_URL:
-    logger.warning("SECURITY_WARNING ALEXA_SKILL_ID or SKILL_ENABLEMENT_URL not set — "
-                   "skill enablement step will be SKIPPED (set for production)")
 if not _COGNITO_USER_POOL_ID:
     logger.warning("SECURITY_WARNING COGNITO_USER_POOL_ID not set — "
                    "JWT signature verification DISABLED (set for production)")
@@ -300,36 +295,6 @@ def _get_amazon_user_id(access_token: str) -> str | None:
         return None
 
 
-def _enable_alexa_skill(access_token: str) -> None:
-    """
-    Call the Alexa Skill Enablement API to activate the skill for the user
-    identified by access_token (~current resolves to that user automatically).
-    Expects HTTP 201 Created. Raises RuntimeError on any non-2xx response.
-    """
-    url = f"{_SKILL_ENABLEMENT_URL}/{_ALEXA_SKILL_ID}/enablement"
-    logger.debug("SKILL_ENABLE_START url=%s skill_id=%s stage=%s",
-                 url, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE)
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps({"stage": _ALEXA_SKILL_STAGE}).encode(),
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type":  "application/json",
-        },
-        method="PUT",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_LWA_HTTP_TIMEOUT):
-            pass  # 201 Created — no response body needed
-        logger.debug("SKILL_ENABLE_OK skill_id=%s stage=%s", _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE)
-    except urllib.error.HTTPError as e:
-        err = e.read().decode(errors="replace")
-        logger.error("SKILL_ENABLE_HTTP_ERROR skill_id=%s stage=%s status=%d body=%s",
-                     _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, e.code, err)
-        raise RuntimeError(f"Skill enablement failed HTTP {e.code}: {err}") from e
-
-
 def lambda_handler(event, context):  # noqa: ANN001
     request_id = getattr(context, "aws_request_id", "local")
     logger.info("REQUEST_START function=completeAppToApp request_id=%s", request_id)
@@ -484,27 +449,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         user_id, state, token_type, expires_in, expires_at, request_id,
     )
 
-    # ── 6. Enable the Alexa skill for this user ───────────────────────────────
-    if not _ALEXA_SKILL_ID or not _SKILL_ENABLEMENT_URL:
-        logger.warning("SKILL_ENABLE_SKIPPED ALEXA_SKILL_ID or SKILL_ENABLEMENT_URL not configured "
-                       "userId=%s request_id=%s", user_id, request_id)
-    else:
-        logger.info("SKILL_ENABLE userId=%s skill_id=%s stage=%s request_id=%s",
-                    user_id, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, request_id)
-        try:
-            _enable_alexa_skill(access_token)
-        except RuntimeError as exc:
-            logger.error("SKILL_ENABLE_FAILED userId=%s skill_id=%s error=%s request_id=%s",
-                         user_id, _ALEXA_SKILL_ID, exc, request_id)
-            return _resp(502, {"error": "Failed to enable Alexa skill"})
-
-        # AUDIT — skill enabled for user
-        logger.info(
-            "[AUDIT] SKILL_ENABLED userId=%s skill_id=%s stage=%s request_id=%s",
-            user_id, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE, request_id,
-        )
-
-    # ── 7. Store tokens in LWA table ──────────────────────────────────────────
+    # ── 6. Store tokens in LWA table ──────────────────────────────────────────
     linked_at = int(time.time())
 
     # Fetch Amazon user ID for reverse-lookup when Alexa sends SkillDisabled events
@@ -535,7 +480,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     logger.debug("TOKEN_STORE_OK table=%s userId=%s request_id=%s",
                  _TOKENS_TABLE, user_id, request_id)
 
-    # ── 7b. Update per-site linked flag in user-device mapping table ──────────
+    # ── 6b. Update per-site linked flag in user-device mapping table ─────────
     if site_id and _USER_DEVICE_MAPPING_TABLE:
         logger.info("SITE_LINK_UPDATE table=%s userId=%s siteId=%s request_id=%s",
                     _USER_DEVICE_MAPPING_TABLE, user_id, site_id, request_id)
@@ -556,13 +501,13 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     # AUDIT — full account linking completed
     logger.info(
-        "[AUDIT] ACCOUNT_LINKED userId=%s siteId=%s state=%s skill_id=%s stage=%s "
+        "[AUDIT] ACCOUNT_LINKED userId=%s siteId=%s state=%s skill_id=%s "
         "link_method=app-to-app linked_at=%d token_expires_at=%d request_id=%s",
-        user_id, site_id or "none", state, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE,
+        user_id, site_id or "none", state, _ALEXA_SKILL_ID,
         linked_at, expires_at, request_id,
     )
 
-    # ── 8. Return success ─────────────────────────────────────────────────────
+    # ── 7. Return success ─────────────────────────────────────────────────────
     logger.info("REQUEST_OK function=completeAppToApp userId=%s state=%s request_id=%s",
                 user_id, state, request_id)
     return _resp(200, {"linked": True})

@@ -3,26 +3,17 @@
 #
 # TOKEN REQUIREMENTS
 # ──────────────────
-# startAppToApp (POST) has authorizationScopes: smarthome_server/read+write.
-# This means it ONLY accepts Flutter OAuth access tokens (from the Cognito
-# Hosted UI OAuth flow), NOT CLI USER_PASSWORD_AUTH tokens.
+# ALL authenticated endpoints require a Flutter OAuth access token
+# (smarthome_server/read+write scopes from Cognito Hosted UI OAuth flow).
+# CLI USER_PASSWORD_AUTH tokens do NOT carry these scopes → rejected with 401.
 #
 # This script detects the token type automatically:
-#   • Flutter OAuth access token  → all sections run (full test)
-#   • CLI ID token / access token → section 4 (startAppToApp) is SKIPPED
-#     with a clear notice; all other sections still run.
+#   • Flutter OAuth access token  → all 25 checks run (full test)
+#   • CLI ID/access token         → sections 2, 4, 5, 6, 7, 8 SKIPPED;
+#                                    sections 1, 3, 9 still run (no auth / public)
 #
-# To run the full test suite, get a Flutter OAuth access token from the
-# Cognito Hosted UI and pass it as ACCESS_TOKEN below.
-#
-# To run a partial test (sections 1-3, 5-9) with a CLI token:
-#   TOKEN=$(aws cognito-idp initiate-auth \
-#     --auth-flow USER_PASSWORD_AUTH \
-#     --client-id q7189jitfkk4ttesepkgls491 \
-#     --auth-parameters USERNAME=stores@digilux.co.in,PASSWORD=Admin@1234 \
-#     --region ap-south-1 \
-#     --query 'AuthenticationResult.IdToken' --output text)
-#   sed "s|^ACCESS_TOKEN=.*|ACCESS_TOKEN=\"$TOKEN\"|" /tmp/alexa_live_test.sh | bash
+# To run the full test suite, obtain a Flutter OAuth access token from the
+# Cognito Hosted UI (smarthome_server scopes) and set it as ACCESS_TOKEN below.
 
 ACCESS_TOKEN="<REPLACE_WITH_TOKEN>"
 
@@ -70,8 +61,8 @@ echo " Base: $BASE"
 if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
   echo " Auth: Flutter OAuth access token (smarthome_server scopes) — FULL TEST"
 else
-  echo " Auth: CLI token (no smarthome_server scopes) — section 4 will be SKIPPED"
-  echo "        startAppToApp requires a Flutter OAuth access token."
+  echo " Auth: CLI token (no smarthome_server scopes) — authenticated sections SKIPPED"
+  echo "        All Alexa endpoints require a Flutter OAuth access token."
 fi
 echo "=================================================="
 
@@ -94,24 +85,28 @@ check "unlink — no auth → 401" "401" "$R"
 
 echo ""
 echo "── 2. Status — Before Linking ───────────────────"
-R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE/api/v1/alexa/status")
-check "GET /status → 200 with linked field" "linked" "$R"
-check "GET /status — linked=false" '"linked": false' "$R"
+if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
+  R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE/api/v1/alexa/status")
+  check "GET /status → 200 with linked field" "linked" "$R"
+  check "GET /status — linked=false" '"linked": false' "$R"
+else
+  skip "GET /status → 200 with linked field" "Requires Flutter OAuth access token (smarthome_server/read scope)"
+  skip "GET /status — linked=false"          "Requires Flutter OAuth access token (smarthome_server/read scope)"
+fi
 
 echo ""
 echo "── 3. Callback — Public Endpoint ────────────────"
 R=$(curl -s --http1.1 "$BASE/alexa/callback?error=access_denied")
-check "callback — error param → HTML 200" "Linking Failed" "$R"
+check "callback — error param → HTML error page" "Linking Failed" "$R"
 
 R=$(curl -s --http1.1 "$BASE/alexa/callback?code=TESTCODE123&state=somestate")
-check "callback — code+state → HTML 200" "digilux://" "$R"
+check "callback — code+state → HTML success page" "digilux://" "$R"
 check "callback success — deep link has code" "TESTCODE123" "$R"
 check "callback success — Open Digilux App button" "Open Digilux App" "$R"
 
 echo ""
 echo "── 4. startAppToApp ─────────────────────────────"
 echo "   NOTE: requires Flutter OAuth access token (smarthome_server/read+write scope)"
-echo "         CLI tokens are rejected by design — scope enforces production token type."
 
 STATE=""
 if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
@@ -134,40 +129,53 @@ if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
 
   check "redirectUri = iot.digilux.co.in/alexa/callback" "iot.digilux.co.in/alexa/callback" "$REDIRECT_URI"
 else
-  skip "startAppToApp → state field" "CLI token lacks smarthome_server scope — use Flutter OAuth access token"
-  skip "returns codeChallenge"        "CLI token lacks smarthome_server scope — use Flutter OAuth access token"
-  skip "returns redirectUri"          "CLI token lacks smarthome_server scope — use Flutter OAuth access token"
-  skip "state is UUID (36 chars)"     "CLI token lacks smarthome_server scope — use Flutter OAuth access token"
-  skip "codeChallenge is 43 chars"    "CLI token lacks smarthome_server scope — use Flutter OAuth access token"
-  skip "redirectUri = iot.digilux.co.in/alexa/callback" "CLI token lacks smarthome_server scope — use Flutter OAuth access token"
-  # Generate a temporary UUID so section 5 + 8 can still run meaningful checks
-  STATE=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+  skip "startAppToApp → state field"                        "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "returns codeChallenge"                              "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "returns redirectUri"                                "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "state is UUID (36 chars)"                           "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "codeChallenge is 43 chars (PKCE S256)"              "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "redirectUri = iot.digilux.co.in/alexa/callback"    "Requires Flutter OAuth access token (smarthome_server scopes)"
 fi
 
 echo ""
 echo "── 5. completeAppToApp — Input Validation ───────"
-R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
-  -X POST "$BASE/api/v1/alexa/completeAppToApp" -d '{}')
-check "empty body → 'code is required'" "code is required" "$R"
+if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
+  R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+    -X POST "$BASE/api/v1/alexa/completeAppToApp" -d '{}')
+  check "empty body → 'code is required'" "code is required" "$R"
 
-R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
-  -X POST "$BASE/api/v1/alexa/completeAppToApp" -d '{"code":"X","state":"not-a-uuid"}')
-check "malformed state → 'Invalid state format'" "Invalid state format" "$R"
+  R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+    -X POST "$BASE/api/v1/alexa/completeAppToApp" -d '{"code":"X","state":"not-a-uuid"}')
+  check "malformed state → 'Invalid state format'" "Invalid state format" "$R"
 
-R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
-  -X POST "$BASE/api/v1/alexa/completeAppToApp" \
-  -d "{\"code\":\"FAKECODE\",\"state\":\"$STATE\"}")
-check "valid UUID state → Lambda processed (LWA rejection expected)" "error|linked" "$R"
+  FAKE_STATE="${STATE:-$(python3 -c 'import uuid; print(str(uuid.uuid4()))')}"
+  R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+    -X POST "$BASE/api/v1/alexa/completeAppToApp" \
+    -d "{\"code\":\"FAKECODE\",\"state\":\"$FAKE_STATE\"}")
+  check "valid UUID state → Lambda processed (LWA rejection expected)" "error|linked" "$R"
+else
+  skip "empty body → 'code is required'"                              "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "malformed state → 'Invalid state format'"                     "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "valid UUID state → Lambda processed (LWA rejection expected)" "Requires Flutter OAuth access token (smarthome_server scopes)"
+fi
 
 echo ""
 echo "── 6. Unlink ────────────────────────────────────"
-R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -X DELETE "$BASE/api/v1/alexa/unlink")
-check "unlink → 404 No linked account" "No linked Alexa account" "$R"
+if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
+  R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" -X DELETE "$BASE/api/v1/alexa/unlink")
+  check "unlink → 404 No linked account" "No linked Alexa account" "$R"
+else
+  skip "unlink → 404 No linked account" "Requires Flutter OAuth access token (smarthome_server scopes)"
+fi
 
 echo ""
 echo "── 7. Status — After Tests ──────────────────────"
-R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE/api/v1/alexa/status")
-check "GET /status — linked=false (still unlinked)" '"linked": false' "$R"
+if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
+  R=$(curl -s --http1.1 -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE/api/v1/alexa/status")
+  check "GET /status — linked=false (confirmed)" '"linked": false' "$R"
+else
+  skip "GET /status — linked=false (confirmed)" "Requires Flutter OAuth access token (smarthome_server scopes)"
+fi
 
 echo ""
 echo "── 8. DynamoDB Consistency ──────────────────────"
@@ -178,18 +186,19 @@ if [ "$HAS_SMARTHOME_SCOPE" = "true" ]; then
     --region ap-south-1 \
     --query 'Item.status.S' --output text 2>/dev/null)
   check "session in DDB — status=USED" "USED" "$SESSION"
-else
-  skip "session in DDB — status=USED" "Section 4 was skipped (CLI token) — no real session was created"
-fi
 
-TOKEN_RECORD=$(aws dynamodb get-item \
-  --table-name digilux_honeywell_alexa_lwa_tokens \
-  --key "{\"userId\":{\"S\":\"f123dd2a-7061-7004-d4f2-573c0585ad6b\"}}" \
-  --region ap-south-1 \
-  --output text 2>/dev/null)
-[ -z "$TOKEN_RECORD" ] \
-  && check "tokens table — no record (user unlinked)" "." "ok_match" \
-  || check "tokens table — no record (user unlinked)" "empty" "has_record"
+  TOKEN_RECORD=$(aws dynamodb get-item \
+    --table-name digilux_honeywell_alexa_lwa_tokens \
+    --key "{\"userId\":{\"S\":\"f123dd2a-7061-7004-d4f2-573c0585ad6b\"}}" \
+    --region ap-south-1 \
+    --output text 2>/dev/null)
+  [ -z "$TOKEN_RECORD" ] \
+    && check "tokens table — no record (user unlinked)" "." "ok_match" \
+    || check "tokens table — no record (user unlinked)" "empty" "has_record"
+else
+  skip "session in DDB — status=USED"          "Requires Flutter OAuth access token (smarthome_server scopes)"
+  skip "tokens table — no record (user unlinked)" "Requires Flutter OAuth access token (smarthome_server scopes)"
+fi
 
 echo ""
 echo "── 9. assetlinks.json ───────────────────────────"

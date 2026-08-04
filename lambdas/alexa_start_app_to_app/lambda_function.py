@@ -38,9 +38,8 @@ logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), lo
 _REGION        = os.environ.get("DATA_REGION",         "")
 _SESSION_TABLE = os.environ.get("SESSION_TABLE",        "")
 _REDIRECT_URI  = os.environ.get("REDIRECT_URI",         "")
-_SESSION_TTL_S          = int(os.environ.get("SESSION_TTL_SECONDS",            "600"))  # optional
-_MAX_PENDING_SESSIONS   = int(os.environ.get("MAX_PENDING_SESSIONS_PER_USER",  "5"))   # optional
-_KMS_KEY_ARN            = os.environ.get("KMS_KEY_ARN",             "")
+_SESSION_TTL_S = int(os.environ.get("SESSION_TTL_SECONDS", "600"))  # optional
+_KMS_KEY_ARN   = os.environ.get("KMS_KEY_ARN", "")
 _COGNITO_USER_POOL_ID   = os.environ.get("COGNITO_USER_POOL_ID",    "")
 _COGNITO_REGION         = os.environ.get("COGNITO_REGION",          _REGION or "")
 _ALLOWED_REDIRECT_HOSTS = set(
@@ -157,36 +156,6 @@ def _verify_jwt_signature(token: str) -> None:
         raise ValueError(f"JWT signature invalid: {exc}") from exc
 
 
-def _check_rate_limit(session_table, user_id: str, request_id: str) -> bool:
-    """
-    Enforce per-user rate limit using an atomic counter item in the sessions table.
-    Key format: 'RL#{userId}' with TTL = now + SESSION_TTL_S (auto-resets each window).
-    Returns True if within limit, False if exceeded.
-    """
-    rl_key = f"RL#{user_id}"
-    ttl    = int(time.time()) + _SESSION_TTL_S
-    try:
-        response = session_table.update_item(
-            Key={"state": rl_key},
-            UpdateExpression="ADD #c :one SET #t = if_not_exists(#t, :ttl), userId = :uid",
-            ExpressionAttributeNames={"#c": "count", "#t": "ttl"},
-            ExpressionAttributeValues={":one": 1, ":ttl": ttl, ":uid": "RATELIMIT"},
-            ReturnValues="ALL_NEW",
-        )
-        count = int(response["Attributes"].get("count", 1))
-        logger.debug("RATE_LIMIT_CHECK userId=%s count=%d max=%d request_id=%s",
-                     user_id, count, _MAX_PENDING_SESSIONS, request_id)
-        if count > _MAX_PENDING_SESSIONS:
-            logger.warning("RATE_LIMIT_EXCEEDED userId=%s count=%d max=%d request_id=%s",
-                           user_id, count, _MAX_PENDING_SESSIONS, request_id)
-            return False
-        return True
-    except Exception as exc:
-        logger.error("RATE_LIMIT_CHECK_ERROR userId=%s error=%s request_id=%s",
-                     user_id, exc, request_id)
-        return True  # fail open — don't block users if rate-limit check itself fails
-
-
 def _decode_jwt_sub(token: str) -> str:
     """
     Extract the Cognito `sub` claim from a JWT without re-verifying the
@@ -256,12 +225,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         logger.warning("AUTH_FAILED reason=%s request_id=%s", exc, request_id)
         return _resp(401, {"error": "Unauthorized"})
 
-    # ── 2. Rate limit — max N pending sessions per user per TTL window ───────
-    session_table = _ddb().Table(_SESSION_TABLE)
-    if not _check_rate_limit(session_table, user_id, request_id):
-        return _resp(429, {"error": "Too many pending sessions. Please wait and try again."})
-
-    # ── 3. Generate state + PKCE ──────────────────────────────────────────────
+    # ── 2. Generate state + PKCE ──────────────────────────────────────────────
     logger.debug("GENERATING_PKCE userId=%s request_id=%s", user_id, request_id)
     state                         = str(uuid.uuid4())
     code_verifier, code_challenge = _generate_pkce()
@@ -273,7 +237,8 @@ def lambda_handler(event, context):  # noqa: ANN001
         user_id, state, now, expires_at, _SESSION_TTL_S, request_id,
     )
 
-    # ── 4. Persist session (codeVerifier KMS-encrypted if key configured) ────
+    # ── 3. Persist session (codeVerifier KMS-encrypted if key configured) ────
+    session_table = _ddb().Table(_SESSION_TABLE)
     encrypted_verifier = _encrypt_field(code_verifier)
     logger.debug("DDB_PUT_START table=%s userId=%s state=%s kms_enabled=%s request_id=%s",
                  _SESSION_TABLE, user_id, state, bool(_KMS_KEY_ARN), request_id)
@@ -298,7 +263,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         user_id, state, now, expires_at, _SESSION_TTL_S, _REDIRECT_URI, request_id,
     )
 
-    # ── 4. Return values for Flutter to build the Alexa companion URL ─────────
+    # ── 4. Return state + PKCE values to Flutter ─────────────────────────────
     logger.info(
         "REQUEST_OK function=startAppToApp userId=%s state=%s request_id=%s",
         user_id, state, request_id,
