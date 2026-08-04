@@ -79,6 +79,8 @@ _COGNITO_REGION            = os.environ.get("COGNITO_REGION",                  _
 _MAX_REQUEST_BODY_BYTES    = int(os.environ.get("MAX_REQUEST_BODY_BYTES",      "4096"))  # optional
 _MAX_AUTH_CODE_LEN         = int(os.environ.get("MAX_AUTH_CODE_LEN",          "2048"))  # optional
 _LWA_REVOKE_URL            = os.environ.get("LWA_REVOKE_URL",                 "")
+_LWA_PROFILE_URL           = os.environ.get("LWA_PROFILE_URL",
+                                             "https://api.amazon.com/user/profile")
 _COGNITO_ISSUER = (
     f"https://cognito-idp.{_COGNITO_REGION}.amazonaws.com/{_COGNITO_USER_POOL_ID}"
     if _COGNITO_USER_POOL_ID else ""
@@ -273,6 +275,29 @@ def _exchange_code(code: str, code_verifier: str) -> dict:
         err = e.read().decode(errors="replace")
         logger.error("LWA_EXCHANGE_HTTP_ERROR status=%d body=%s", e.code, err)
         raise RuntimeError(f"LWA token exchange failed HTTP {e.code}: {err}") from e
+
+
+def _get_amazon_user_id(access_token: str) -> str | None:
+    """
+    Call the Amazon LWA Profile API to get the stable Amazon user ID.
+    This ID is stored in DynamoDB so that the alexa_skill_events Lambda
+    can look up the Cognito userId when Alexa sends a SkillDisabled event.
+    Returns None on failure — best-effort, does not block linking.
+    """
+    req = urllib.request.Request(
+        _LWA_PROFILE_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_LWA_HTTP_TIMEOUT) as r:
+            profile = json.loads(r.read())
+        amazon_user_id = profile.get("user_id", "")
+        logger.debug("LWA_PROFILE_OK user_id_prefix=%s", amazon_user_id[:12] if amazon_user_id else "none")
+        return amazon_user_id or None
+    except Exception as exc:
+        logger.warning("LWA_PROFILE_ERROR error=%s — amazonUserId will not be stored", exc)
+        return None
 
 
 def _enable_alexa_skill(access_token: str) -> None:
@@ -481,17 +506,31 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     # ── 7. Store tokens in LWA table ──────────────────────────────────────────
     linked_at = int(time.time())
+
+    # Fetch Amazon user ID for reverse-lookup when Alexa sends SkillDisabled events
+    amazon_user_id = _get_amazon_user_id(access_token)
+    if amazon_user_id:
+        logger.info("AMAZON_USER_ID_FETCHED userId=%s amazon_user_id_prefix=%s request_id=%s",
+                    user_id, amazon_user_id[:12], request_id)
+    else:
+        logger.warning("AMAZON_USER_ID_MISSING userId=%s — SkillDisabled events cannot be "
+                       "mapped to this user request_id=%s", user_id, request_id)
+
     logger.debug("TOKEN_STORE_START table=%s userId=%s expires_at=%d request_id=%s",
                  _TOKENS_TABLE, user_id, expires_at, request_id)
 
-    _ddb().Table(_TOKENS_TABLE).put_item(Item={
+    token_item: dict = {
         "userId":       user_id,
         "accessToken":  _encrypt_field(access_token),
         "refreshToken": _encrypt_field(refresh_token),
         "expiresAt":    expires_at,
         "linkedAt":     linked_at,
         "linkMethod":   "app-to-app",
-    })
+    }
+    if amazon_user_id:
+        token_item["amazonUserId"] = amazon_user_id
+
+    _ddb().Table(_TOKENS_TABLE).put_item(Item=token_item)
 
     logger.debug("TOKEN_STORE_OK table=%s userId=%s request_id=%s",
                  _TOKENS_TABLE, user_id, request_id)
