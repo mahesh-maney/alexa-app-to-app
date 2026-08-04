@@ -3,10 +3,14 @@ alexa_link_status — GET /api/v1/alexa/status
 
 Returns whether the authenticated user has a linked Alexa account.
 
-Flow:
-  1. Authenticate the caller via Cognito JWT (Authorization: Bearer <token>)
-  2. Look up the user's record in DynamoDB (digilux_honeywell_alexa_lwa_tokens)
-  3. Return { "linked": true, "linkedAt": <epoch_ms> } or { "linked": false }
+Without ?siteId (global check):
+  Reads from digilux_honeywell_alexa_lwa_tokens.
+  Response: { "linked": bool, "linkedAt": <epoch> }
+
+With ?siteId=<id> (per-site check):
+  Reads alexaLinked/alexaLinkedAt from digilux_honeywell_user_device_mapping,
+  and isAlexaEnabled from user_device_details (set by create_and_update_data_function).
+  Response: { "linked": bool, "siteId": "...", "linkedAt": <epoch>, "isAlexaEnabled": bool }
 
 Error responses:
   401 — unauthenticated
@@ -30,6 +34,7 @@ logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), lo
 _REGION                    = os.environ.get("DATA_REGION",                "")
 _TOKENS_TABLE              = os.environ.get("LWA_TOKENS_TABLE",           "")
 _USER_DEVICE_MAPPING_TABLE = os.environ.get("USER_DEVICE_MAPPING_TABLE",  "")
+_USER_DEVICE_DETAILS_TABLE = os.environ.get("USER_DEVICE_DETAILS_TABLE",  "user_device_details")
 _COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 _COGNITO_REGION       = os.environ.get("COGNITO_REGION",       _REGION or "")
 _COGNITO_ISSUER = (
@@ -174,10 +179,23 @@ def lambda_handler(event, context):  # noqa: ANN001
         linked = bool(item and item.get("alexaLinked"))
         linked_at = int(item["alexaLinkedAt"]) if item and item.get("alexaLinkedAt") else None
 
-        logger.info("STATUS_CHECK userId=%s siteId=%s linked=%s linkedAt=%s request_id=%s",
-                    user_id, site_id, linked, linked_at, request_id)
+        # Fetch isAlexaEnabled from user_device_details table
+        is_alexa_enabled = False
+        try:
+            details_result = _ddb().Table(_USER_DEVICE_DETAILS_TABLE).get_item(
+                Key={"userId": user_id, "siteId": site_id}
+            )
+            details_item = details_result.get("Item")
+            if details_item:
+                is_alexa_enabled = bool(details_item.get("isAlexaEnabled", False))
+        except Exception as exc:
+            logger.warning("DDB_ERROR table=%s error=%s userId=%s siteId=%s request_id=%s",
+                           _USER_DEVICE_DETAILS_TABLE, exc, user_id, site_id, request_id)
 
-        response: dict = {"linked": linked, "siteId": site_id}
+        logger.info("STATUS_CHECK userId=%s siteId=%s linked=%s linkedAt=%s isAlexaEnabled=%s request_id=%s",
+                    user_id, site_id, linked, linked_at, is_alexa_enabled, request_id)
+
+        response: dict = {"linked": linked, "siteId": site_id, "isAlexaEnabled": is_alexa_enabled}
         if linked_at is not None:
             response["linkedAt"] = linked_at
         return _resp(200, response)
