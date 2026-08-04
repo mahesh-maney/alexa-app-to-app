@@ -1,11 +1,12 @@
 ==================================================
  Digilux Alexa App-to-App — AWS Live Test Results
- Date       : 2026-08-04 12:22 IST
+ Date       : 2026-08-04 12:35 IST
  Environment: Production (ap-south-1)
  API Base   : https://iot.digilux.co.in/smarthome
  API Gateway: ds6nxf8ac5 (main Digilux account)
  Test User  : stores@digilux.co.in
  Cognito    : ap-south-1_h1o8s7257
+ Token type : CLI ID token (USER_PASSWORD_AUTH)
 ==================================================
 
 ── 1. Auth Guard (all 5 endpoints) ─────────────────
@@ -26,12 +27,15 @@
   PASS  callback success — Open Digilux App button
 
 ── 4. startAppToApp ─────────────────────────────────
-  PASS  startAppToApp → state field
-  PASS  returns codeChallenge
-  PASS  returns redirectUri
-  PASS  state is UUID (36 chars)
-  PASS  codeChallenge is 43 chars (PKCE S256)
-  PASS  redirectUri = iot.digilux.co.in/alexa/callback
+  SKIP  startAppToApp → state field
+  SKIP  returns codeChallenge
+  SKIP  returns redirectUri
+  SKIP  state is UUID (36 chars)
+  SKIP  codeChallenge is 43 chars (PKCE S256)
+  SKIP  redirectUri = iot.digilux.co.in/alexa/callback
+         Reason: startAppToApp POST has authorizationScopes smarthome_server/read+write.
+         CLI tokens (USER_PASSWORD_AUTH) lack these scopes and are correctly rejected.
+         Run with a Flutter OAuth access token for full coverage of this section.
 
 ── 5. completeAppToApp — Input Validation ───────────
   PASS  empty body → 'code is required'
@@ -48,16 +52,21 @@
   PASS  GET /status — linked=false (confirmed)
 
 ── 8. DynamoDB Consistency ──────────────────────────
-  PASS  session in DDB — status=USED
+  SKIP  session in DDB — status=USED
+         Reason: section 4 skipped (CLI token) — no real session was created
   PASS  tokens table — no record (user is unlinked)
 
-── 9. redirectUri in startAppToApp response ─────────
-  PASS  redirectUri = iot.digilux.co.in/alexa/callback
+── 9. assetlinks.json ───────────────────────────────
+  PASS  assetlinks.json — live at iot.digilux.co.in/.well-known/assetlinks.json
+  PASS  assetlinks.json — correct prod SHA256 fingerprint (B2:F9:FD...)
 
 ==================================================
- Results: 25 passed, 0 failed
- ALL TESTS PASSED
+ Results: 19 passed, 0 failed, 7 skipped
+ PASSED (with 7 skipped — run with Flutter OAuth token for full coverage)
 ==================================================
+
+Full coverage (25/25) expected when Flutter OAuth access token is used.
+Section 4 (startAppToApp) and DDB session check require smarthome_server scopes.
 
 Notes
 ─────
@@ -65,16 +74,21 @@ Notes
   under custom domain iot.digilux.co.in. Deployed stage: smarthome (not prod —
   all deployments must target the smarthome stage to take effect on live domain).
 
-- Authorizer: Cognito USER_POOLS (fp1yfy) on pool ap-south-1_h1o8s7257.
-  No authorizationScopes set on any endpoint — authorizer accepts both ID tokens
-  and access tokens. Flutter OAuth access tokens (smarthome_server/read+write)
-  also accepted.
+- startAppToApp authorizationScopes: smarthome_server/read + smarthome_server/write
+  (permanent). Only Flutter OAuth access tokens (Hosted UI flow) carry these scopes.
+  CLI USER_PASSWORD_AUTH tokens are correctly rejected with 401 — this is by design.
+  The test script auto-detects the token type and SKIPs section 4 for CLI tokens
+  instead of failing.
 
-- Token type: Cognito ID token works (token_use: id). CLI-generated tokens
-  via USER_PASSWORD_AUTH are preferred for testing — they use an independent
+- Authorizer: Cognito USER_POOLS (fp1yfy) on pool ap-south-1_h1o8s7257.
+  No authorizationScopes on completeAppToApp, status, or unlink — those accept
+  both ID tokens and Flutter OAuth access tokens.
+
+- Token type: Cognito ID token works for sections 1-3, 5-9. CLI-generated tokens
+  via USER_PASSWORD_AUTH are preferred for partial testing — they use an independent
   session and are NOT revoked when the Flutter app user logs out.
 
-  Generate test token:
+  Generate CLI test token:
     aws cognito-idp initiate-auth \
       --auth-flow USER_PASSWORD_AUTH \
       --client-id q7189jitfkk4ttesepkgls491 \
@@ -121,9 +135,9 @@ Notes
 
 - Alexa-initiated unlink: POST /alexa/skill-event handles
   AlexaSkillEvent.SkillDisabled events from Amazon. On receipt, deletes LWA
-  tokens and sets alexaLinked=false on all user sites. completeAppToApp now
-  stores amazonUserId (from LWA Profile API) to enable GSI-based reverse
-  lookup (amazonUserId-index on digilux_honeywell_alexa_lwa_tokens).
+  tokens and sets alexaLinked=false on all user sites. completeAppToApp stores
+  amazonUserId (from LWA Profile API) to enable GSI-based reverse lookup
+  (amazonUserId-index on digilux_honeywell_alexa_lwa_tokens).
 
 - Full happy path (startAppToApp → Alexa consent → completeAppToApp →
   status → unlink → status) requires real Alexa account — manual QA only.
