@@ -6,7 +6,7 @@ Unlinks a user's Alexa account from Digilux.
 Flow:
   1. Authenticate the caller via Cognito JWT (Authorization: Bearer <token>)
   2. Look up the user's LWA tokens in DynamoDB
-  3. If no tokens found, return 404 (not linked)
+  3. If no tokens found, clear per-site mapping (if siteId given) and return 200
   4. Disable the Alexa skill for this user (best-effort — failure is logged, not fatal)
   5. Revoke the refresh token with Amazon LWA (best-effort — failure is logged, not fatal)
   6. Delete the token record from DynamoDB
@@ -344,8 +344,23 @@ def lambda_handler(event, context):  # noqa: ANN001
     item   = result.get("Item")
 
     if not item:
-        logger.warning("TOKEN_NOT_FOUND userId=%s request_id=%s", user_id, request_id)
-        return _resp(404, {"error": "No linked Alexa account found for this user"})
+        logger.warning("TOKEN_NOT_FOUND userId=%s request_id=%s — cleaning up site mapping if siteId present",
+                       user_id, request_id)
+        # Token already gone — still clear per-site state so UI stays consistent
+        if site_id and _USER_DEVICE_MAPPING_TABLE:
+            try:
+                _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
+                    Key={"userId": user_id, "siteId": site_id},
+                    UpdateExpression="SET alexaLinked = :f REMOVE alexaLinkedAt",
+                    ExpressionAttributeValues={":f": False},
+                )
+                logger.info("SITE_MAPPING_CLEARED userId=%s siteId=%s request_id=%s",
+                            user_id, site_id, request_id)
+            except Exception as exc:
+                logger.warning("SITE_MAPPING_CLEAR_FAILED userId=%s siteId=%s error=%s request_id=%s",
+                               user_id, site_id, exc, request_id)
+            _notify_alexa_disabled(user_id, site_id)
+        return _resp(200, {"unlinked": True})
 
     logger.debug("TOKEN_FOUND userId=%s linked_at=%s request_id=%s",
                  user_id, item.get("linkedAt"), request_id)
