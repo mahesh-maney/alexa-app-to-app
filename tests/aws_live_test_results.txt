@@ -1,6 +1,6 @@
 ==================================================
  Digilux Alexa App-to-App — AWS Live Test Results
- Date       : 2026-08-03 20:00 IST
+ Date       : 2026-08-04 12:22 IST
  Environment: Production (ap-south-1)
  API Base   : https://iot.digilux.co.in/smarthome
  API Gateway: ds6nxf8ac5 (main Digilux account)
@@ -31,7 +31,7 @@
   PASS  returns redirectUri
   PASS  state is UUID (36 chars)
   PASS  codeChallenge is 43 chars (PKCE S256)
-  PASS  redirectUri = iot.digilux.co.in/smarthome/alexa/callback
+  PASS  redirectUri = iot.digilux.co.in/alexa/callback
 
 ── 5. completeAppToApp — Input Validation ───────────
   PASS  empty body → 'code is required'
@@ -51,23 +51,24 @@
   PASS  session in DDB — status=USED
   PASS  tokens table — no record (user is unlinked)
 
-── 9. assetlinks.json ───────────────────────────────
-  PASS  assetlinks.json — live at iot.digilux.co.in/.well-known/assetlinks.json
-  PASS  assetlinks.json — correct SHA256 fingerprint (B2:F9:FD...)
+── 9. redirectUri in startAppToApp response ─────────
+  PASS  redirectUri = iot.digilux.co.in/alexa/callback
 
 ==================================================
- Results: 26 passed, 0 failed
+ Results: 25 passed, 0 failed
  ALL TESTS PASSED
 ==================================================
 
 Notes
 ─────
 - API Gateway: ds6nxf8ac5 (main Digilux account). All Alexa routes accessible
-  under custom domain iot.digilux.co.in/smarthome.
+  under custom domain iot.digilux.co.in. Deployed stage: smarthome (not prod —
+  all deployments must target the smarthome stage to take effect on live domain).
 
 - Authorizer: Cognito USER_POOLS (fp1yfy) on pool ap-south-1_h1o8s7257.
-  No authorizationScopes set — authorizer accepts both ID tokens and access
-  tokens. Previous authorizer (ddhsbg) replaced due to stale JWKS cache.
+  No authorizationScopes set on any endpoint — authorizer accepts both ID tokens
+  and access tokens. Flutter OAuth access tokens (smarthome_server/read+write)
+  also accepted.
 
 - Token type: Cognito ID token works (token_use: id). CLI-generated tokens
   via USER_PASSWORD_AUTH are preferred for testing — they use an independent
@@ -85,22 +86,26 @@ Notes
   the user logs out (RevokeToken). A revoked token returns 403 "Access Denied"
   even if the JWT is not expired. Always use a fresh CLI token for testing.
 
-- Redirect URI: updated from www.digilux.co.in/alexa/callback to
-  iot.digilux.co.in/smarthome/alexa/callback. Lambda serves HTML callback
-  page directly — no web server needed.
+- Redirect URI: iot.digilux.co.in/alexa/callback (no /smarthome prefix).
+  Lambda serves HTML callback page directly. A root (none) base path mapping
+  on the custom domain routes /alexa/callback to API Gateway.
 
 - Android App Links: assetlinks.json live at
   https://iot.digilux.co.in/.well-known/assetlinks.json
   Package: com.digiluxai.smarthomepro
-  SHA256:  B2:F9:FD:20:5D:1D:85:82:0C:D9:7B:32:28:06:70:1D:16:F1:BE:81:
-           BD:76:E3:85:87:C6:84:9F:CC:C5:A4:EC
+  SHA256 (debug): F3:D7:06:2F:68:DA:1D:D6:13:4B:FA:7B:8F:93:31:76:27:84:C3:02:
+                  63:FB:DC:D4:B1:3B:CD:B1:6C:38:31:26
+  SHA256 (prod):  B2:F9:FD:20:5D:1D:85:82:0C:D9:7B:32:28:06:70:1D:16:F1:BE:81:
+                  BD:76:E3:85:87:C6:84:9F:CC:C5:A4:EC
 
 - iOS Universal Links: apple-app-site-association endpoint created at
   iot.digilux.co.in/.well-known/apple-app-site-association — pending iOS
   Team ID and Bundle ID from Flutter team.
 
-- Alexa Developer Console: redirect URL must be updated to
-  https://iot.digilux.co.in/smarthome/alexa/callback — pending access.
+- Alexa Developer Console: redirect URL confirmed as
+  https://iot.digilux.co.in/alexa/callback.
+  Skill event URL must be set to https://iot.digilux.co.in/alexa/skill-event
+  with AlexaSkillEvent.SkillDisabled subscription enabled.
 
 - completeAppToApp "Failed to complete Alexa account linking": expected —
   fake auth code sent to Amazon LWA, correctly rejected. Real happy path
@@ -108,6 +113,17 @@ Notes
 
 - Unlink 404: correct — test user has no linked account yet.
   After a real linking flow, DELETE /unlink returns {"unlinked": true}.
+
+- siteId support: completeAppToApp accepts optional siteId in request body.
+  GET /status?siteId= returns per-site linked status from
+  digilux_honeywell_user_device_mapping. DELETE /unlink?siteId= clears
+  alexaLinked flag for that site.
+
+- Alexa-initiated unlink: POST /alexa/skill-event handles
+  AlexaSkillEvent.SkillDisabled events from Amazon. On receipt, deletes LWA
+  tokens and sets alexaLinked=false on all user sites. completeAppToApp now
+  stores amazonUserId (from LWA Profile API) to enable GSI-based reverse
+  lookup (amazonUserId-index on digilux_honeywell_alexa_lwa_tokens).
 
 - Full happy path (startAppToApp → Alexa consent → completeAppToApp →
   status → unlink → status) requires real Alexa account — manual QA only.
