@@ -63,6 +63,7 @@ logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), lo
 _REGION                    = os.environ.get("DATA_REGION",                "")
 _SESSION_TABLE             = os.environ.get("SESSION_TABLE",              "")
 _TOKENS_TABLE              = os.environ.get("LWA_TOKENS_TABLE",           "")
+_USER_DEVICE_MAPPING_TABLE = os.environ.get("USER_DEVICE_MAPPING_TABLE",  "")
 _REDIRECT_URI              = os.environ.get("REDIRECT_URI",               "")
 _LWA_SECRET_ARN            = os.environ.get("LWA_SECRET_ARN",             "")
 _LWA_SECRET_REGION         = os.environ.get("LWA_SECRET_REGION",          "")
@@ -343,9 +344,10 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     logger.debug("BODY_PARSE_START request_id=%s", request_id)
     try:
-        body  = json.loads(raw_body or "{}")
-        code  = str(body.get("code",  "")).strip()
-        state = str(body.get("state", "")).strip()
+        body    = json.loads(raw_body or "{}")
+        code    = str(body.get("code",    "")).strip()
+        state   = str(body.get("state",   "")).strip()
+        site_id = str(body.get("siteId",  "")).strip()
     except (json.JSONDecodeError, TypeError) as exc:
         logger.warning("BODY_PARSE_FAILED reason=%s request_id=%s", exc, request_id)
         return _resp(400, {"error": "Invalid JSON body"})
@@ -494,11 +496,30 @@ def lambda_handler(event, context):  # noqa: ANN001
     logger.debug("TOKEN_STORE_OK table=%s userId=%s request_id=%s",
                  _TOKENS_TABLE, user_id, request_id)
 
+    # ── 7b. Update per-site linked flag in user-device mapping table ──────────
+    if site_id and _USER_DEVICE_MAPPING_TABLE:
+        logger.info("SITE_LINK_UPDATE table=%s userId=%s siteId=%s request_id=%s",
+                    _USER_DEVICE_MAPPING_TABLE, user_id, site_id, request_id)
+        try:
+            _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
+                Key={"userId": user_id, "siteId": site_id},
+                UpdateExpression="SET alexaLinked = :t, alexaLinkedAt = :ts",
+                ExpressionAttributeValues={":t": True, ":ts": linked_at},
+            )
+            logger.info("SITE_LINK_UPDATE_OK userId=%s siteId=%s request_id=%s",
+                        user_id, site_id, request_id)
+        except Exception as exc:
+            logger.error("SITE_LINK_UPDATE_FAILED userId=%s siteId=%s error=%s request_id=%s",
+                         user_id, site_id, exc, request_id)
+    elif site_id:
+        logger.warning("SITE_LINK_UPDATE_SKIPPED USER_DEVICE_MAPPING_TABLE not configured "
+                       "userId=%s siteId=%s request_id=%s", user_id, site_id, request_id)
+
     # AUDIT — full account linking completed
     logger.info(
-        "[AUDIT] ACCOUNT_LINKED userId=%s state=%s skill_id=%s stage=%s "
+        "[AUDIT] ACCOUNT_LINKED userId=%s siteId=%s state=%s skill_id=%s stage=%s "
         "link_method=app-to-app linked_at=%d token_expires_at=%d request_id=%s",
-        user_id, state, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE,
+        user_id, site_id or "none", state, _ALEXA_SKILL_ID, _ALEXA_SKILL_STAGE,
         linked_at, expires_at, request_id,
     )
 

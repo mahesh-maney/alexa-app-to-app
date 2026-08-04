@@ -27,8 +27,9 @@ logger = logging.getLogger()
 logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 # ── Environment variables ──────────────────────────────────────────────────────
-_REGION               = os.environ.get("DATA_REGION",          "")
-_TOKENS_TABLE         = os.environ.get("LWA_TOKENS_TABLE",     "")
+_REGION                    = os.environ.get("DATA_REGION",                "")
+_TOKENS_TABLE              = os.environ.get("LWA_TOKENS_TABLE",           "")
+_USER_DEVICE_MAPPING_TABLE = os.environ.get("USER_DEVICE_MAPPING_TABLE",  "")
 _COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 _COGNITO_REGION       = os.environ.get("COGNITO_REGION",       _REGION or "")
 _COGNITO_ISSUER = (
@@ -150,25 +151,56 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     logger.info("AUTH_OK userId=%s request_id=%s", user_id, request_id)
 
-    # ── 2. Look up token record ───────────────────────────────────────────────
-    try:
-        result = _ddb().Table(_TOKENS_TABLE).get_item(Key={"userId": user_id})
-    except Exception as exc:
-        logger.error("DDB_ERROR error=%s userId=%s request_id=%s", exc, user_id, request_id)
-        return _resp(500, {"error": "Server configuration error"})
+    # ── 2. Extract optional siteId query param ────────────────────────────────
+    site_id = ((event.get("queryStringParameters") or {}).get("siteId") or "").strip()
 
-    item = result.get("Item")
+    # ── 3. Look up status ─────────────────────────────────────────────────────
+    if site_id:
+        # Per-site status from user-device mapping table
+        if not _USER_DEVICE_MAPPING_TABLE:
+            logger.error("CONFIG_ERROR USER_DEVICE_MAPPING_TABLE not set userId=%s "
+                         "siteId=%s request_id=%s", user_id, site_id, request_id)
+            return _resp(500, {"error": "Server configuration error"})
+        try:
+            result = _ddb().Table(_USER_DEVICE_MAPPING_TABLE).get_item(
+                Key={"userId": user_id, "siteId": site_id}
+            )
+        except Exception as exc:
+            logger.error("DDB_ERROR error=%s userId=%s siteId=%s request_id=%s",
+                         exc, user_id, site_id, request_id)
+            return _resp(500, {"error": "Server configuration error"})
 
-    # ── 3. Return status ──────────────────────────────────────────────────────
-    if not item:
-        logger.info("STATUS_CHECK userId=%s linked=false request_id=%s", user_id, request_id)
-        return _resp(200, {"linked": False})
+        item = result.get("Item")
+        linked = bool(item and item.get("alexaLinked"))
+        linked_at = int(item["alexaLinkedAt"]) if item and item.get("alexaLinkedAt") else None
 
-    linked_at = item.get("linkedAt")
-    response = {"linked": True}
-    if linked_at is not None:
-        response["linkedAt"] = int(linked_at)
+        logger.info("STATUS_CHECK userId=%s siteId=%s linked=%s linkedAt=%s request_id=%s",
+                    user_id, site_id, linked, linked_at, request_id)
 
-    logger.info("STATUS_CHECK userId=%s linked=true linkedAt=%s request_id=%s",
-                user_id, linked_at, request_id)
-    return _resp(200, response)
+        response: dict = {"linked": linked, "siteId": site_id}
+        if linked_at is not None:
+            response["linkedAt"] = linked_at
+        return _resp(200, response)
+
+    else:
+        # Global (non-site) status from LWA tokens table
+        try:
+            result = _ddb().Table(_TOKENS_TABLE).get_item(Key={"userId": user_id})
+        except Exception as exc:
+            logger.error("DDB_ERROR error=%s userId=%s request_id=%s", exc, user_id, request_id)
+            return _resp(500, {"error": "Server configuration error"})
+
+        item = result.get("Item")
+
+        if not item:
+            logger.info("STATUS_CHECK userId=%s linked=false request_id=%s", user_id, request_id)
+            return _resp(200, {"linked": False})
+
+        linked_at = item.get("linkedAt")
+        response = {"linked": True}
+        if linked_at is not None:
+            response["linkedAt"] = int(linked_at)
+
+        logger.info("STATUS_CHECK userId=%s linked=true linkedAt=%s request_id=%s",
+                    user_id, linked_at, request_id)
+        return _resp(200, response)

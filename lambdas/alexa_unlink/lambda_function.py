@@ -34,9 +34,10 @@ logger = logging.getLogger()
 logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 # ── Environment variables ──────────────────────────────────────────────────────
-_REGION               = os.environ.get("DATA_REGION",          "")
-_TOKENS_TABLE         = os.environ.get("LWA_TOKENS_TABLE",     "")
-_LWA_SECRET_ARN       = os.environ.get("LWA_SECRET_ARN",       "")
+_REGION                    = os.environ.get("DATA_REGION",                "")
+_TOKENS_TABLE              = os.environ.get("LWA_TOKENS_TABLE",           "")
+_USER_DEVICE_MAPPING_TABLE = os.environ.get("USER_DEVICE_MAPPING_TABLE",  "")
+_LWA_SECRET_ARN            = os.environ.get("LWA_SECRET_ARN",             "")
 _LWA_SECRET_REGION    = os.environ.get("LWA_SECRET_REGION",    "")
 _LWA_REVOKE_URL       = os.environ.get("LWA_REVOKE_URL",       "")
 _SKILL_ENABLEMENT_URL = os.environ.get("SKILL_ENABLEMENT_URL", "")
@@ -303,6 +304,9 @@ def lambda_handler(event, context):  # noqa: ANN001
         logger.warning("AUTH_FAILED reason=%s request_id=%s", exc, request_id)
         return _resp(401, {"error": "Unauthorized"})
 
+    # ── 1b. Extract optional siteId query param ───────────────────────────────
+    site_id = ((event.get("queryStringParameters") or {}).get("siteId") or "").strip()
+
     # ── 2. Look up user's tokens ──────────────────────────────────────────────
     tokens_table = _ddb().Table(_TOKENS_TABLE)
     logger.debug("TOKEN_LOOKUP table=%s userId=%s request_id=%s",
@@ -361,11 +365,30 @@ def lambda_handler(event, context):  # noqa: ANN001
     logger.debug("TOKEN_DELETE_OK table=%s userId=%s request_id=%s",
                  _TOKENS_TABLE, user_id, request_id)
 
+    # ── 6b. Clear per-site linked flag in user-device mapping table ───────────
+    if site_id and _USER_DEVICE_MAPPING_TABLE:
+        logger.info("SITE_UNLINK_UPDATE table=%s userId=%s siteId=%s request_id=%s",
+                    _USER_DEVICE_MAPPING_TABLE, user_id, site_id, request_id)
+        try:
+            _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
+                Key={"userId": user_id, "siteId": site_id},
+                UpdateExpression="SET alexaLinked = :f REMOVE alexaLinkedAt",
+                ExpressionAttributeValues={":f": False},
+            )
+            logger.info("SITE_UNLINK_UPDATE_OK userId=%s siteId=%s request_id=%s",
+                        user_id, site_id, request_id)
+        except Exception as exc:
+            logger.error("SITE_UNLINK_UPDATE_FAILED userId=%s siteId=%s error=%s request_id=%s",
+                         user_id, site_id, exc, request_id)
+    elif site_id:
+        logger.warning("SITE_UNLINK_UPDATE_SKIPPED USER_DEVICE_MAPPING_TABLE not configured "
+                       "userId=%s siteId=%s request_id=%s", user_id, site_id, request_id)
+
     # AUDIT — account unlinked
     logger.info(
-        "[AUDIT] ACCOUNT_UNLINKED userId=%s skill_id=%s "
+        "[AUDIT] ACCOUNT_UNLINKED userId=%s siteId=%s skill_id=%s "
         "skill_disabled=%s token_revoked=%s request_id=%s",
-        user_id, _ALEXA_SKILL_ID or "unknown",
+        user_id, site_id or "none", _ALEXA_SKILL_ID or "unknown",
         bool(access_token and _SKILL_ENABLEMENT_URL and _ALEXA_SKILL_ID),
         bool(refresh_token and _LWA_REVOKE_URL),
         request_id,
