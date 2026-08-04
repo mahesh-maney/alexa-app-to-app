@@ -45,6 +45,7 @@ _ALEXA_SKILL_ID       = os.environ.get("ALEXA_SKILL_ID",       "")
 _KMS_KEY_ARN          = os.environ.get("KMS_KEY_ARN",          "")
 _COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 _COGNITO_REGION       = os.environ.get("COGNITO_REGION",       _REGION or "")
+_CREATE_UPDATE_FN     = os.environ.get("CREATE_UPDATE_FN",  "")
 _LWA_HTTP_TIMEOUT     = int(os.environ.get("LWA_HTTP_TIMEOUT", "10"))  # optional
 _COGNITO_ISSUER = (
     f"https://cognito-idp.{_COGNITO_REGION}.amazonaws.com/{_COGNITO_USER_POOL_ID}"
@@ -78,10 +79,11 @@ if not _SKILL_ENABLEMENT_URL or not _ALEXA_SKILL_ID:
                    "skill will NOT be disabled on unlink")
 
 # Module-level caches
-_dynamodb       = None
+_dynamodb        = None
 _lwa_creds: tuple[str, str] | None = None
-_kms_cache      = None
+_kms_cache       = None
 _jwks_cache: dict | None = None
+_lambda_client   = None
 
 
 def _ddb():
@@ -274,6 +276,32 @@ def _revoke_refresh_token(refresh_token: str, user_id: str, request_id: str) -> 
                        exc, user_id, request_id)
 
 
+def _notify_alexa_disabled(user_id: str, site_id: str) -> None:
+    """Async fire-and-forget: set isAlexaEnabled=false on the site. Non-fatal."""
+    if not _CREATE_UPDATE_FN or not site_id:
+        return
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_REGION)
+    payload = json.dumps({
+        "_source":        "alexa_internal",
+        "userId":         user_id,
+        "siteId":         site_id,
+        "isAlexaEnabled": False,
+    }).encode()
+    try:
+        _lambda_client.invoke(
+            FunctionName=_CREATE_UPDATE_FN,
+            InvocationType="Event",
+            Payload=payload,
+        )
+        logger.info("ALEXA_DISABLED_NOTIFY_SENT fn=%s userId=%s siteId=%s",
+                    _CREATE_UPDATE_FN, user_id, site_id)
+    except Exception as exc:
+        logger.warning("ALEXA_DISABLED_NOTIFY_FAILED fn=%s userId=%s siteId=%s error=%s",
+                       _CREATE_UPDATE_FN, user_id, site_id, exc)
+
+
 def lambda_handler(event, context):  # noqa: ANN001
     request_id = getattr(context, "aws_request_id", "local")
     logger.info("REQUEST_START function=alexaUnlink request_id=%s", request_id)
@@ -393,6 +421,9 @@ def lambda_handler(event, context):  # noqa: ANN001
         bool(refresh_token and _LWA_REVOKE_URL),
         request_id,
     )
+
+    # ── 6c. Notify create_and_update_data_function to set isAlexaEnabled=false ─
+    _notify_alexa_disabled(user_id, site_id)
 
     # ── 7. Return success ─────────────────────────────────────────────────────
     logger.info("REQUEST_OK function=alexaUnlink userId=%s request_id=%s",

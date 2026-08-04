@@ -69,6 +69,7 @@ _LWA_SECRET_ARN            = os.environ.get("LWA_SECRET_ARN",             "")
 _LWA_SECRET_REGION         = os.environ.get("LWA_SECRET_REGION",          "")
 _LWA_TOKEN_URL             = os.environ.get("LWA_TOKEN_URL",              "")
 _ALEXA_SKILL_ID            = os.environ.get("ALEXA_SKILL_ID",             "")  # for audit logging only
+_CREATE_UPDATE_FN          = os.environ.get("CREATE_UPDATE_FN",           "")
 _LWA_HTTP_TIMEOUT          = int(os.environ.get("LWA_HTTP_TIMEOUT",            "10"))  # optional
 _TOKEN_EXPIRY_BUFFER_S     = int(os.environ.get("TOKEN_EXPIRY_BUFFER_SECONDS",  "60"))  # optional
 _KMS_KEY_ARN               = os.environ.get("KMS_KEY_ARN",                    "")
@@ -111,10 +112,11 @@ if not _LWA_REVOKE_URL:
                    "token revocation on unlink will be unavailable")
 
 # Module-level caches
-_dynamodb       = None
+_dynamodb        = None
 _lwa_creds: tuple[str, str] | None = None
-_kms_cache      = None
+_kms_cache       = None
 _jwks_cache: dict | None = None
+_lambda_client   = None
 
 
 def _ddb():
@@ -293,6 +295,36 @@ def _get_amazon_user_id(access_token: str) -> str | None:
     except Exception as exc:
         logger.warning("LWA_PROFILE_ERROR error=%s — amazonUserId will not be stored", exc)
         return None
+
+
+def _notify_alexa_enabled(user_id: str, site_id: str, is_enabled: bool) -> None:
+    """
+    Async fire-and-forget: tell create_and_update_data_function to set
+    isAlexaEnabled on the site record and user data table.
+    Non-fatal — failure is logged, linking is already complete.
+    """
+    if not _CREATE_UPDATE_FN or not site_id:
+        return
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_REGION)
+    payload = json.dumps({
+        "_source":        "alexa_internal",
+        "userId":         user_id,
+        "siteId":         site_id,
+        "isAlexaEnabled": is_enabled,
+    }).encode()
+    try:
+        _lambda_client.invoke(
+            FunctionName=_CREATE_UPDATE_FN,
+            InvocationType="Event",   # async — does not block response
+            Payload=payload,
+        )
+        logger.info("ALEXA_ENABLED_NOTIFY_SENT fn=%s userId=%s siteId=%s isAlexaEnabled=%s",
+                    _CREATE_UPDATE_FN, user_id, site_id, is_enabled)
+    except Exception as exc:
+        logger.warning("ALEXA_ENABLED_NOTIFY_FAILED fn=%s userId=%s siteId=%s error=%s",
+                       _CREATE_UPDATE_FN, user_id, site_id, exc)
 
 
 def lambda_handler(event, context):  # noqa: ANN001
@@ -506,6 +538,9 @@ def lambda_handler(event, context):  # noqa: ANN001
         user_id, site_id or "none", state, _ALEXA_SKILL_ID,
         linked_at, expires_at, request_id,
     )
+
+    # ── 6c. Notify create_and_update_data_function to set isAlexaEnabled=true ─
+    _notify_alexa_enabled(user_id, site_id, True)
 
     # ── 7. Return success ─────────────────────────────────────────────────────
     logger.info("REQUEST_OK function=completeAppToApp userId=%s state=%s request_id=%s",
