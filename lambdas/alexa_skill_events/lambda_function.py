@@ -136,16 +136,31 @@ def _handle_skill_disabled(alexa_user_id: str, skill_id: str, request_id: str) -
     """
     tokens_table = _ddb().Table(_TOKENS_TABLE)
 
-    # ── 1. Find Cognito userId via amazonUserId GSI ───────────────────────────
-    logger.debug("GSI_LOOKUP indexName=amazonUserId-index alexa_user_id=%s request_id=%s",
-                 alexa_user_id, request_id)
+    # ── 1. Find Cognito userId ────────────────────────────────────────────────
+    # SKILL_DISABLED events from Alexa use amzn1.ask.account.XXX format (Alexa
+    # Customer ID). Try alexaCustomerId-index first, then fall back to the LWA
+    # format (amzn1.account.XXX) via amazonUserId-index.
+    items = []
 
-    result = tokens_table.query(
-        IndexName="amazonUserId-index",
-        KeyConditionExpression=Key("amazonUserId").eq(alexa_user_id),
-        Limit=1,
-    )
-    items = result.get("Items", [])
+    if alexa_user_id.startswith("amzn1.ask.account."):
+        logger.debug("GSI_LOOKUP indexName=alexaCustomerId-index alexa_user_id=%s request_id=%s",
+                     alexa_user_id, request_id)
+        result = tokens_table.query(
+            IndexName="alexaCustomerId-index",
+            KeyConditionExpression=Key("alexaCustomerId").eq(alexa_user_id),
+            Limit=1,
+        )
+        items = result.get("Items", [])
+
+    if not items:
+        logger.debug("GSI_LOOKUP indexName=amazonUserId-index alexa_user_id=%s request_id=%s",
+                     alexa_user_id, request_id)
+        result = tokens_table.query(
+            IndexName="amazonUserId-index",
+            KeyConditionExpression=Key("amazonUserId").eq(alexa_user_id),
+            Limit=1,
+        )
+        items = result.get("Items", [])
 
     if not items:
         logger.warning(
@@ -293,7 +308,36 @@ def lambda_handler(event, context):  # noqa: ANN001
         logger.warning("BODY_PARSE_FAILED request_id=%s", request_id)
         return _resp(400, {"error": "Invalid JSON body"})
 
-    # ── 3. Validate skill application ID ──────────────────────────────────────
+    # ── 3a. Alexa.Authorization.Error / SKILL_DISABLED (SMAPI format) ─────────
+    # Amazon delivers this format to the skill events endpoint when a user
+    # disables the skill from the Alexa app. Structure:
+    # { "header": { "namespace": "Alexa.Authorization", "name": "Error", ... },
+    #   "event":  { "type": "SKILL_DISABLED", "userId": "amzn1.ask.account.XXX" } }
+    # This has no context.System, so it must be handled before the skill-ID check.
+    top_header = body.get("header") or {}
+    if (top_header.get("namespace") == "Alexa.Authorization"
+            and top_header.get("name") == "Error"):
+        ev = body.get("event") or {}
+        event_type    = ev.get("type", "")
+        alexa_user_id = ev.get("userId", "")
+        logger.info("ALEXA_AUTHORIZATION_ERROR type=%s alexaUserId=%s request_id=%s",
+                    event_type, alexa_user_id, request_id)
+        if event_type == "SKILL_DISABLED":
+            if alexa_user_id:
+                try:
+                    _handle_skill_disabled(alexa_user_id, "", request_id)
+                except Exception as exc:
+                    logger.error("SKILL_DISABLED_HANDLER_ERROR error=%s request_id=%s",
+                                 exc, request_id)
+            else:
+                logger.warning("SKILL_DISABLED_NO_USER_ID request_id=%s", request_id)
+        else:
+            logger.info("UNHANDLED_AUTHORIZATION_ERROR_TYPE type=%s request_id=%s",
+                        event_type, request_id)
+        logger.info("REQUEST_OK function=alexaSkillEvents request_id=%s", request_id)
+        return _resp(200, {"received": True})
+
+    # ── 3b. Validate skill application ID ─────────────────────────────────────
     skill_id = (body.get("context") or {}).get("System", {}).get(
         "application", {}).get("applicationId", "")
     if _ALEXA_SKILL_ID and skill_id != _ALEXA_SKILL_ID:
