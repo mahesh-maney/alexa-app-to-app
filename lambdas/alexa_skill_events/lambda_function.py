@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.request
 
 import boto3
@@ -197,6 +198,78 @@ def _handle_skill_disabled(alexa_user_id: str, skill_id: str, request_id: str) -
     )
 
 
+def _handle_skill_account_linked(alexa_user_id: str, skill_id: str, request_id: str) -> None:
+    """
+    Handle AlexaSkillEvent.SkillAccountLinked — fired when a user links their
+    Amazon account to the Digilux skill (either via Alexa app or App-to-App flow).
+
+    Steps:
+      1. Look up the Cognito userId via the amazonUserId GSI on the tokens table.
+      2. Set alexaLinked=true on all of the user's sites in user_device_mapping.
+
+    Note: this only works if the user has previously linked via the App-to-App
+    flow (which stores amazonUserId). Users who link exclusively via the Alexa
+    app will not have a GSI record and cannot be looked up.
+    """
+    tokens_table = _ddb().Table(_TOKENS_TABLE)
+
+    # ── 1. Find Cognito userId via amazonUserId GSI ───────────────────────────
+    result = tokens_table.query(
+        IndexName="amazonUserId-index",
+        KeyConditionExpression=Key("amazonUserId").eq(alexa_user_id),
+        Limit=1,
+    )
+    items = result.get("Items", [])
+
+    if not items:
+        logger.warning(
+            "SKILL_ACCOUNT_LINKED_USER_NOT_FOUND alexaUserId=%s request_id=%s — "
+            "no App-to-App token record; cannot map to Cognito user",
+            alexa_user_id, request_id,
+        )
+        return
+
+    user_id = items[0]["userId"]
+    logger.info(
+        "SKILL_ACCOUNT_LINKED_USER_FOUND userId=%s alexaUserId=%s request_id=%s",
+        user_id, alexa_user_id, request_id,
+    )
+
+    # ── 2. Set alexaLinked=true on all user sites ─────────────────────────────
+    if _USER_DEVICE_MAPPING_TABLE:
+        mapping_table = _ddb().Table(_USER_DEVICE_MAPPING_TABLE)
+        linked_at = int(time.time())
+
+        site_result = mapping_table.query(
+            KeyConditionExpression=Key("userId").eq(user_id),
+        )
+        sites = site_result.get("Items", [])
+
+        for site in sites:
+            site_id = site.get("siteId")
+            if not site_id:
+                continue
+            mapping_table.update_item(
+                Key={"userId": user_id, "siteId": site_id},
+                UpdateExpression="SET alexaLinked = :t, alexaLinkedAt = :ts",
+                ExpressionAttributeValues={":t": True, ":ts": linked_at},
+            )
+            logger.info("SITE_LINKED userId=%s siteId=%s request_id=%s",
+                        user_id, site_id, request_id)
+
+        logger.info("ALL_SITES_LINKED userId=%s site_count=%d request_id=%s",
+                    user_id, len(sites), request_id)
+    else:
+        logger.warning("USER_DEVICE_MAPPING_TABLE not set — site flags not updated "
+                       "userId=%s request_id=%s", user_id, request_id)
+
+    # AUDIT
+    logger.info(
+        "[AUDIT] ALEXA_APP_LINKED userId=%s alexaUserId=%s skill_id=%s request_id=%s",
+        user_id, alexa_user_id, skill_id, request_id,
+    )
+
+
 def lambda_handler(event, context):  # noqa: ANN001
     request_id = getattr(context, "aws_request_id", "local")
     logger.info("REQUEST_START function=alexaSkillEvents request_id=%s", request_id)
@@ -254,8 +327,14 @@ def lambda_handler(event, context):  # noqa: ANN001
                     "request_id=%s", alexa_user_id, request_id)
 
     elif request_type == "AlexaSkillEvent.SkillAccountLinked":
-        logger.info("SKILL_ACCOUNT_LINKED alexaUserId=%s — no action needed request_id=%s",
-                    alexa_user_id, request_id)
+        if not alexa_user_id:
+            logger.warning("SKILL_ACCOUNT_LINKED_NO_USER_ID request_id=%s", request_id)
+        else:
+            try:
+                _handle_skill_account_linked(alexa_user_id, skill_id, request_id)
+            except Exception as exc:
+                logger.error("SKILL_ACCOUNT_LINKED_HANDLER_ERROR error=%s request_id=%s",
+                             exc, request_id)
 
     else:
         logger.info("UNHANDLED_EVENT_TYPE type=%s request_id=%s", request_type, request_id)
