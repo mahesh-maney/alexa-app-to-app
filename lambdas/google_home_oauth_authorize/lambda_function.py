@@ -73,8 +73,29 @@ _REQUIRED_VARS = {
     "COGNITO_CLIENT_ID":  _COGNITO_CLIENT_ID,
 }
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
+
+# ── Startup diagnostics ────────────────────────────────────────────────────────
 if _missing_vars:
-    logger.error("CONFIG_STARTUP_ERROR missing_required_env=%s", _missing_vars)
+    logger.error(
+        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_oauth_authorize "
+        "— all invocations will return HTTP 500 until these are set",
+        _missing_vars,
+    )
+else:
+    logger.info(
+        "CONFIG_OK function=google_home_oauth_authorize region=%s "
+        "sessions_table=%s auth_codes_table=%s cognito_pool=%s cognito_region=%s "
+        "auth_code_ttl_seconds=%d app_name=%s allowed_redirect_uris_count=%d",
+        _REGION, _SESSIONS_TABLE, _AUTH_CODES_TABLE,
+        _COGNITO_USER_POOL_ID or "(not set — JWT verify disabled)",
+        _COGNITO_REGION, _AUTH_CODE_TTL_S, _APP_NAME, len(_ALLOWED_REDIRECTS),
+    )
+
+if not _ALLOWED_REDIRECTS:
+    logger.warning(
+        "CONFIG_WARNING ALLOWED_REDIRECT_URIS not set — all redirect_uri values accepted "
+        "(set this in production to restrict OAuth clients)"
+    )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
 _dynamodb = None

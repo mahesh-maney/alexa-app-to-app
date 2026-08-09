@@ -51,8 +51,20 @@ _DEVICE_MAPPING_TABLE = os.environ.get("USER_DEVICE_MAPPING_TABLE",
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
+
+# ── Startup diagnostics ────────────────────────────────────────────────────────
 if _missing_vars:
-    logger.error("CONFIG_STARTUP_ERROR missing_required_env=%s", _missing_vars)
+    logger.error(
+        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_fulfillment "
+        "— all invocations will return HTTP 500 until these are set",
+        _missing_vars,
+    )
+else:
+    logger.info(
+        "CONFIG_OK function=google_home_fulfillment region=%s "
+        "tokens_table=%s device_mapping_table=%s",
+        _REGION, _TOKENS_TABLE, _DEVICE_MAPPING_TABLE,
+    )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
 _dynamodb = None

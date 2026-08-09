@@ -59,8 +59,22 @@ _REQUIRED_VARS = {
     "GOOGLE_CLIENT_SECRET_ARN":  _GH_SECRET_ARN,
 }
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
+
+# ── Startup diagnostics ────────────────────────────────────────────────────────
 if _missing_vars:
-    logger.error("CONFIG_STARTUP_ERROR missing_required_env=%s", _missing_vars)
+    logger.error(
+        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_oauth_token "
+        "— all invocations will return HTTP 500 until these are set",
+        _missing_vars,
+    )
+else:
+    logger.info(
+        "CONFIG_OK function=google_home_oauth_token region=%s "
+        "auth_codes_table=%s tokens_table=%s secret_region=%s "
+        "agent_id=%s access_token_ttl_seconds=%d refresh_token_ttl_seconds=%d",
+        _REGION, _AUTH_CODES_TABLE, _TOKENS_TABLE, _GH_SECRET_REGION,
+        _AGENT_ID or "(not set)", _ACCESS_TOKEN_TTL_S, _REFRESH_TOKEN_TTL_S,
+    )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
 _dynamodb = None
