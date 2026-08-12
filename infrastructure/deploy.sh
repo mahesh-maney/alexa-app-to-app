@@ -32,16 +32,19 @@ ALLOWED_REDIRECT_HOSTS="iot.digilux.co.in"
 # Resource names
 SESSION_TABLE="alexa_app_linking_sessions"
 LWA_TOKENS_TABLE="digilux_honeywell_alexa_lwa_tokens"
+USER_DEVICE_MAPPING_TABLE="digilux_honeywell_user_device_mapping"
 LAMBDA_START="alexa_start_app_to_app"
 LAMBDA_COMPLETE="alexa_complete_app_to_app"
 LAMBDA_CALLBACK="alexa_callback"
 LAMBDA_UNLINK="alexa_unlink"
+LAMBDA_STATUS="alexa_link_status"
 
 # IAM role names (one per Lambda for least privilege)
 ROLE_START="digilux-alexa-start-role"
 ROLE_COMPLETE="digilux-alexa-complete-role"
 ROLE_CALLBACK="digilux-alexa-callback-role"
 ROLE_UNLINK="digilux-alexa-unlink-role"
+ROLE_STATUS="digilux-alexa-status-role"
 
 # Alexa skill
 ALEXA_SKILL_ID="${ALEXA_SKILL_ID:-amzn1.ask.skill.YOUR_SKILL_ID}"
@@ -271,6 +274,43 @@ create_or_update_role "$ROLE_UNLINK" "$(cat <<POLICY
 POLICY
 )"
 
+# status role: LWA tokens (GetItem, UpdateItem) + user-device mapping (GetItem, UpdateItem)
+#              + user-device details (GetItem) + Secrets + KMS decrypt
+create_or_update_role "$ROLE_STATUS" "$(cat <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TokensTable",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem","dynamodb:UpdateItem","dynamodb:DeleteItem"],
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${LWA_TOKENS_TABLE}"
+    },
+    {
+      "Sid": "UserDeviceMapping",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem","dynamodb:UpdateItem"],
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${USER_DEVICE_MAPPING_TABLE}"
+    },
+    {
+      "Sid": "LwaSecret",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "${LWA_SECRET_ARN}"
+    },
+    {
+      "Sid": "KmsDecrypt",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": "${KMS_KEY_ARN}"
+    },
+    ${LOGS_STMT},
+    ${XRAY_STMT}
+  ]
+}
+POLICY
+)"
+
 echo "    Waiting 10s for IAM propagation..."
 sleep 10
 
@@ -278,6 +318,7 @@ ROLE_START_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_START}"
 ROLE_COMPLETE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_COMPLETE}"
 ROLE_CALLBACK_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_CALLBACK}"
 ROLE_UNLINK_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_UNLINK}"
+ROLE_STATUS_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_STATUS}"
 
 # ── 3. Package + deploy Lambda functions ──────────────────────────────────────
 echo ""
@@ -387,10 +428,24 @@ UNLINK_ENV="{
   LOG_LEVEL=INFO
 }"
 
+# status env vars
+STATUS_ENV="{
+  DATA_REGION=${REGION},
+  LWA_TOKENS_TABLE=${LWA_TOKENS_TABLE},
+  USER_DEVICE_MAPPING_TABLE=${USER_DEVICE_MAPPING_TABLE},
+  LWA_SECRET_ARN=${LWA_SECRET_ARN},
+  LWA_SECRET_REGION=eu-west-1,
+  KMS_KEY_ARN=${KMS_KEY_ARN},
+  COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},
+  COGNITO_REGION=${COGNITO_REGION},
+  LOG_LEVEL=INFO
+}"
+
 deploy_lambda "$LAMBDA_START"    "${LAMBDA_DIR}/alexa_start_app_to_app"    "$ROLE_START_ARN"    "$START_ENV"    15
 deploy_lambda "$LAMBDA_COMPLETE" "${LAMBDA_DIR}/alexa_complete_app_to_app" "$ROLE_COMPLETE_ARN" "$COMPLETE_ENV" 30
 deploy_lambda "$LAMBDA_CALLBACK" "${LAMBDA_DIR}/alexa_callback"            "$ROLE_CALLBACK_ARN" "$CALLBACK_ENV" 10
 deploy_lambda "$LAMBDA_UNLINK"   "${LAMBDA_DIR}/alexa_unlink"              "$ROLE_UNLINK_ARN"   "$UNLINK_ENV"   15
+deploy_lambda "$LAMBDA_STATUS"   "${LAMBDA_DIR}/alexa_link_status"         "$ROLE_STATUS_ARN"   "$STATUS_ENV"   15
 
 # ── 4. AWS WAF WebACL ─────────────────────────────────────────────────────────
 echo ""
@@ -532,6 +587,10 @@ V1_ID=$(aws apigateway get-resources \
 ALEXA_ID=$(get_or_create_resource "$V1_ID" "alexa")
 echo "    /api/v1/alexa resource: $ALEXA_ID"
 
+STATUS_ID=$(get_or_create_resource "$ALEXA_ID" "status")
+add_method_with_auth "$STATUS_ID" "GET" "$LAMBDA_STATUS" "true"
+echo "    GET    /api/v1/alexa/status           -> $LAMBDA_STATUS (Cognito auth)"
+
 START_ID=$(get_or_create_resource "$ALEXA_ID" "startAppToApp")
 add_method_with_auth "$START_ID" "POST" "$LAMBDA_START" "true"
 echo "    POST   /api/v1/alexa/startAppToApp    -> $LAMBDA_START (Cognito auth)"
@@ -565,7 +624,7 @@ echo "    Deployed to stage: prod"
 echo ""
 echo "==> [7/7] Log retention + CloudWatch alarms"
 
-for FUNC in "$LAMBDA_START" "$LAMBDA_COMPLETE" "$LAMBDA_CALLBACK" "$LAMBDA_UNLINK"; do
+for FUNC in "$LAMBDA_START" "$LAMBDA_COMPLETE" "$LAMBDA_CALLBACK" "$LAMBDA_UNLINK" "$LAMBDA_STATUS"; do
   LOG_GROUP="/aws/lambda/$FUNC"
   aws logs create-log-group --log-group-name "$LOG_GROUP" --region "$REGION" 2>/dev/null || true
   aws logs put-retention-policy \
@@ -614,10 +673,14 @@ START_LOG="/aws/lambda/${LAMBDA_START}"
 create_alarm "alexa-auth-failed"            "$START_LOG"    "AUTH_FAILED"            "AuthFailed"           5
 create_alarm "alexa-rate-limit-exceeded"    "$START_LOG"    "RATE_LIMIT_EXCEEDED"    "RateLimitExceeded"    1
 
-for FUNC in "$LAMBDA_START" "$LAMBDA_COMPLETE" "$LAMBDA_CALLBACK" "$LAMBDA_UNLINK"; do
+for FUNC in "$LAMBDA_START" "$LAMBDA_COMPLETE" "$LAMBDA_CALLBACK" "$LAMBDA_UNLINK" "$LAMBDA_STATUS"; do
   LOG_GROUP="/aws/lambda/$FUNC"
   create_alarm "alexa-config-error-${FUNC}" "$LOG_GROUP" "CONFIG_STARTUP_ERROR" "ConfigStartupError_${FUNC}" 1
 done
+
+STATUS_LOG="/aws/lambda/${LAMBDA_STATUS}"
+create_alarm "alexa-status-auth-failed" "$STATUS_LOG" "AUTH_FAILED" "StatusAuthFailed" 5
+create_alarm "alexa-status-lwa-revoked" "$STATUS_LOG" "LWA_TOKEN_REVOKED" "StatusLwaRevoked" 1
 
 echo "    CloudWatch alarms created for: SESSION_ALREADY_USED, SESSION_OWNER_MISMATCH,"
 echo "    LWA_EXCHANGE_FAILED, SKILL_ENABLE_FAILED, AUTH_FAILED, RATE_LIMIT_EXCEEDED, CONFIG_STARTUP_ERROR"
@@ -628,6 +691,7 @@ echo "=================================================="
 echo " Deployment complete."
 echo ""
 echo " Endpoints:"
+echo "   GET    https://${API_ID}.execute-api.${REGION}.amazonaws.com/prod/api/v1/alexa/status"
 echo "   POST   https://${API_ID}.execute-api.${REGION}.amazonaws.com/prod/api/v1/alexa/startAppToApp"
 echo "   POST   https://${API_ID}.execute-api.${REGION}.amazonaws.com/prod/api/v1/alexa/completeAppToApp"
 echo "   DELETE https://${API_ID}.execute-api.${REGION}.amazonaws.com/prod/api/v1/alexa/unlink"

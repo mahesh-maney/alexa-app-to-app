@@ -6,7 +6,7 @@ Unlinks a user's Alexa account from Digilux.
 Flow:
   1. Authenticate the caller via Cognito JWT (Authorization: Bearer <token>)
   2. Look up the user's LWA tokens in DynamoDB
-  3. If no tokens found, clear per-site mapping (if siteId given) and return 200
+  3. If no tokens found, clear per-site mapping (if siteId given) and return 200 (idempotent)
   4. Disable the Alexa skill for this user (best-effort — failure is logged, not fatal)
   5. Revoke the refresh token with Amazon LWA (best-effort — failure is logged, not fatal)
   6. Delete the token record from DynamoDB
@@ -15,7 +15,6 @@ Flow:
 
 Error responses:
   401 — unauthenticated
-  404 — no linked account found for this user
   500 — server configuration error
 """
 from __future__ import annotations
@@ -221,7 +220,7 @@ def _disable_alexa_skill(access_token: str, user_id: str, request_id: str) -> No
         logger.info("SKILL_DISABLE_OK skill_id=%s userId=%s request_id=%s",
                     _ALEXA_SKILL_ID, user_id, request_id)
     except urllib.error.HTTPError as e:
-        err = e.read().decode(errors="replace")
+        err = (e.read() if e.fp is not None else b"").decode(errors="replace")
         logger.warning("SKILL_DISABLE_HTTP_ERROR skill_id=%s status=%d body=%s "
                        "userId=%s request_id=%s",
                        _ALEXA_SKILL_ID, e.code, err, user_id, request_id)
@@ -268,7 +267,7 @@ def _revoke_refresh_token(refresh_token: str, user_id: str, request_id: str) -> 
             pass
         logger.info("TOKEN_REVOKE_OK userId=%s request_id=%s", user_id, request_id)
     except urllib.error.HTTPError as e:
-        err = e.read().decode(errors="replace")
+        err = (e.read() if e.fp is not None else b"").decode(errors="replace")
         logger.warning("TOKEN_REVOKE_HTTP_ERROR status=%d body=%s userId=%s request_id=%s",
                        e.code, err, user_id, request_id)
     except Exception as exc:
