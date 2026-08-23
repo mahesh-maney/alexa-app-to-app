@@ -716,6 +716,106 @@ HTTP_TIMEOUT=10
 
 ---
 
-## 13. Contact
+## 13. Deployment Readiness Checklist
+
+> **Current status: Not ready for production deployment.**
+> All backend code is written and tested. The blockers below must be resolved before the integration will work end-to-end.
+
+### What Is Ready
+
+| Item | Status |
+|------|--------|
+| 7 Lambda functions | Written, 205/205 unit tests passing |
+| Deploy script (`infrastructure/google_home_deploy.sh`) | Ready — creates DynamoDB tables, IAM roles, wires API Gateway routes |
+| Integration guide + env config reference | Done |
+
+---
+
+### Blockers
+
+**1. Google Cloud / Actions Console — nothing registered yet (most critical)**
+
+No Smart Home project has been created in Google Actions Console. Until this is done, the following are unknown/missing:
+
+- `GOOGLE_AGENT_ID` — required before running the deploy script
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` — required for OAuth token exchange
+- OAuth consent screen — must be configured in Google Cloud Console
+- OAuth authorization + token endpoint URLs — must be registered in Actions Console
+- Fulfillment webhook URL — must be registered in Actions Console
+
+**2. Secrets Manager secret not created**
+
+`GOOGLE_CLIENT_SECRET_ARN` does not exist yet. The `google_home_oauth_token` and `google_home_unlink` Lambdas will skip token exchange and token revocation respectively without it.
+
+Create with:
+```bash
+aws secretsmanager create-secret \
+  --name digilux-google-home-oauth \
+  --region ap-south-1 \
+  --secret-string '{"client_id":"YOUR_CLIENT_ID","client_secret":"YOUR_CLIENT_SECRET"}'
+```
+
+**3. Fulfillment is partially stubbed — QUERY and EXECUTE will not work**
+
+| Intent | Status |
+|--------|--------|
+| `SYNC` | Working — returns device list from `digilux_honeywell_user_device_mapping` |
+| `QUERY` | Stub — returns `online: true` as placeholder; no real device state fetched |
+| `EXECUTE` | Stub — logs the command but sends nothing to devices |
+
+QUERY and EXECUTE require integration with the Digilux device control API, which is a separate engineering task after account linking is verified end-to-end.
+
+**4. Flutter side not implemented**
+
+The mobile team has not yet built the Google Home linking UI. The integration guide (this document) is ready for them to start.
+
+**5. Branch not merged to master**
+
+All Google Home code is on `mahesh-google-app-integration` — not yet merged or deployed to production.
+
+---
+
+### Correct Deployment Order
+
+```
+Step 1 — Google Actions Console (pre-deploy, external)
+  → Create a Smart Home project
+  → Configure the OAuth consent screen
+  → Generate OAuth 2.0 credentials (client_id + client_secret)
+  → Note down: GOOGLE_AGENT_ID, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
+
+Step 2 — AWS: Create Secrets Manager secret
+  → Store {"client_id": "...", "client_secret": "..."} at a known ARN
+  → Note down: GOOGLE_SECRET_ARN
+
+Step 3 — Run the deploy script
+  export GOOGLE_AGENT_ID=...
+  export GOOGLE_CLIENT_ID=...
+  export GOOGLE_REDIRECT_URI=https://oauth-redirect.googleusercontent.com/r/YOUR_PROJECT_ID
+  export GOOGLE_SECRET_ARN=arn:aws:secretsmanager:ap-south-1:986906626244:secret:digilux-google-home-oauth
+  bash infrastructure/google_home_deploy.sh
+
+Step 4 — Google Actions Console (post-deploy)
+  → Register OAuth authorization URL:
+      https://iot.digilux.co.in/smarthome/google-home/oauth/authorize
+  → Register OAuth token URL:
+      https://iot.digilux.co.in/smarthome/google-home/oauth/token
+  → Register fulfillment webhook:
+      https://iot.digilux.co.in/smarthome/google-home/fulfillment
+
+Step 5 — Flutter team implements account linking UI
+  → Follow Sections 4–6 of this guide
+
+Step 6 — Test account linking end-to-end
+  → Verify: start → Google Home OAuth → complete → linked: true → status → unlink
+
+Step 7 — Connect QUERY/EXECUTE to Digilux device control API
+  → Devices will appear in Google Home after Step 6
+  → Voice commands (turn on/off, etc.) require this step to actually work
+```
+
+---
+
+## 14. Contact
 
 For backend/API questions, contact the backend team. Do not call the Google OAuth endpoints (`/google-home/oauth/authorize`, `/google-home/oauth/token`, `/google-home/fulfillment`) directly from the app — these are called by Google, not by Flutter.
