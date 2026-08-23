@@ -534,7 +534,7 @@ Seven Lambda functions handle the full flow:
 | `google_home_auth_codes` | `code` | 5-minute TTL OAuth auth codes |
 | `google_home_tokens` | `userId` | Access + refresh tokens from Google |
 
-**Note:** Backend deployment (`infrastructure/google_home_deploy.sh`) is pending. All code is written and tested (205/205 unit tests passing on `mahesh-google-app-integration` branch).
+**Note:** Backend deployment is pending. All code is written and tested (205/205 unit tests passing on `mahesh-google-app-integration` branch). Use `infrastructure/deploy_all.sh --google` to deploy (see Section 13).
 
 ---
 
@@ -726,7 +726,7 @@ HTTP_TIMEOUT=10
 | Item | Status |
 |------|--------|
 | 7 Lambda functions | Written, 205/205 unit tests passing |
-| Deploy script (`infrastructure/google_home_deploy.sh`) | Ready — creates DynamoDB tables, IAM roles, wires API Gateway routes |
+| Zero-touch deploy script (`infrastructure/deploy_all.sh --google`) | Ready — creates DynamoDB tables, IAM roles, wires API Gateway routes on `ds6nxf8ac5` / `smarthome` stage |
 | Integration guide + env config reference | Done |
 
 ---
@@ -788,12 +788,15 @@ Step 2 — AWS: Create Secrets Manager secret
   → Store {"client_id": "...", "client_secret": "..."} at a known ARN
   → Note down: GOOGLE_SECRET_ARN
 
-Step 3 — Run the deploy script
+Step 3 — Run the zero-touch deploy script
   export GOOGLE_AGENT_ID=...
   export GOOGLE_CLIENT_ID=...
   export GOOGLE_REDIRECT_URI=https://oauth-redirect.googleusercontent.com/r/YOUR_PROJECT_ID
   export GOOGLE_SECRET_ARN=arn:aws:secretsmanager:ap-south-1:986906626244:secret:digilux-google-home-oauth
-  bash infrastructure/google_home_deploy.sh
+  bash infrastructure/deploy_all.sh --google
+
+  # Validate prerequisites without deploying:
+  bash infrastructure/deploy_all.sh --google --dry-run
 
 Step 4 — Google Actions Console (post-deploy)
   → Register OAuth authorization URL:
