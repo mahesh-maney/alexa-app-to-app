@@ -182,9 +182,9 @@ def lambda_handler(event, context):  # noqa: ANN001
     # ── 3. Build response ──────────────────────────────────────────────────────
     linked    = bool(record)
     agent_id  = (record or {}).get("agentId", _AGENT_ID)
-    linked_at = (record or {}).get("linkedAt", "")
+    linked_at = int((record or {}).get("linkedAt", 0)) or ""
     scope     = (record or {}).get("scope", "")
-    expires_at = (record or {}).get("expiresAt", 0)
+    expires_at = int((record or {}).get("expiresAt", 0))
 
     if linked:
         logger.info(
