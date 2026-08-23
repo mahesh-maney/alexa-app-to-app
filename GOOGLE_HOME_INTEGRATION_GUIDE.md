@@ -560,6 +560,162 @@ Before marking the integration as complete:
 
 ---
 
-## 12. Contact
+## 12. Environment Configuration
+
+> This section is for the backend/infra team. Flutter team does not need to configure any of these.
+
+Each Lambda has its own set of environment variables. Set these in the AWS Lambda console or via the deploy script.
+
+### Shared across all 7 Lambdas
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATA_REGION` | **Yes** | — | AWS region for DynamoDB (`ap-south-1`) |
+| `LOG_LEVEL` | No | `INFO` | Lambda log verbosity (`DEBUG` / `INFO` / `WARNING` / `ERROR`) |
+
+---
+
+### `google_home_start`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GOOGLE_AGENT_ID` | **Yes** | — | Google Home agent/project ID from Google Cloud Console |
+| `OAUTH_BASE_URL` | **Yes** | — | Base URL of our OAuth server (e.g. `https://iot.digilux.co.in/smarthome`) |
+| `GH_SESSIONS_TABLE` | No | `google_home_link_sessions` | DynamoDB table for linking sessions |
+| `SESSION_TTL_SECONDS` | No | `600` | Session expiry in seconds (10 min) |
+| `GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID — used in `webFallbackUrl` query param |
+| `GOOGLE_REDIRECT_URI` | No | — | OAuth redirect URI registered in Google Cloud Console |
+| `GOOGLE_SCOPE` | No | `profile` | OAuth scopes requested |
+
+---
+
+### `google_home_complete`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GH_SESSIONS_TABLE` | No | `google_home_link_sessions` | DynamoDB sessions table |
+| `GH_TOKENS_TABLE` | No | `google_home_tokens` | DynamoDB tokens table |
+
+---
+
+### `google_home_status`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GH_TOKENS_TABLE` | No | `google_home_tokens` | DynamoDB tokens table |
+| `GOOGLE_AGENT_ID` | No | — | Included in response when token record does not have `agentId` |
+
+---
+
+### `google_home_unlink`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GH_TOKENS_TABLE` | No | `google_home_tokens` | DynamoDB tokens table |
+| `GOOGLE_CLIENT_SECRET_ARN` | No | — | Secrets Manager ARN for Google OAuth credentials — enables token revocation on unlink. If not set, unlink still deletes the DDB record but skips Google revocation. |
+| `GOOGLE_SECRET_REGION` | No | `ap-south-1` | Region of the Secrets Manager secret |
+| `HTTP_TIMEOUT` | No | `10` | Timeout in seconds for Google revocation HTTP call |
+
+---
+
+### `google_home_oauth_authorize`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GOOGLE_CLIENT_ID` | **Yes** | — | Google OAuth client ID — validated against incoming `client_id` param |
+| `COGNITO_CLIENT_ID` | **Yes** | — | Cognito app client ID for user password auth (form login fallback) |
+| `COGNITO_USER_POOL_ID` | No | — | Cognito user pool ID |
+| `COGNITO_REGION` | No | `DATA_REGION` | Region of the Cognito user pool |
+| `ALLOWED_REDIRECT_URIS` | No | — | Comma-separated list of allowed OAuth redirect URIs. If empty, all Google redirect URIs are accepted (not recommended for production). |
+| `GH_SESSIONS_TABLE` | No | `google_home_link_sessions` | DynamoDB sessions table (for `pre_auth_state` lookup) |
+| `GH_AUTH_CODES_TABLE` | No | `google_home_auth_codes` | DynamoDB auth codes table |
+| `AUTH_CODE_TTL_SECONDS` | No | `300` | Auth code expiry in seconds (5 min) |
+| `APP_NAME` | No | `Digilux Smart Home` | App name shown on the OAuth login HTML page |
+
+---
+
+### `google_home_oauth_token`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GOOGLE_CLIENT_SECRET_ARN` | **Yes** | — | Secrets Manager ARN containing `{ "client_id": "...", "client_secret": "..." }` |
+| `GOOGLE_AGENT_ID` | **Yes** | — | Google Home agent ID — stored in token record |
+| `GH_AUTH_CODES_TABLE` | No | `google_home_auth_codes` | DynamoDB auth codes table |
+| `GH_TOKENS_TABLE` | No | `google_home_tokens` | DynamoDB tokens table |
+| `GOOGLE_SECRET_REGION` | No | `ap-south-1` | Region of the Secrets Manager secret |
+| `ACCESS_TOKEN_TTL_SECONDS` | No | `3600` | Access token TTL (1 hour) |
+| `REFRESH_TOKEN_TTL_SECONDS` | No | `15552000` | Refresh token TTL (180 days) |
+
+---
+
+### `google_home_fulfillment`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GH_TOKENS_TABLE` | No | `google_home_tokens` | DynamoDB tokens table (used to authenticate Google's requests via `accessToken-index` GSI) |
+| `USER_DEVICE_MAPPING_TABLE` | No | `digilux_honeywell_user_device_mapping` | DynamoDB table for user→site→device mapping (used for SYNC intent) |
+
+---
+
+### Secrets Manager Secret Format
+
+The secret at `GOOGLE_CLIENT_SECRET_ARN` must be a JSON string:
+```json
+{
+  "client_id":     "your-google-oauth-client-id",
+  "client_secret": "your-google-oauth-client-secret"
+}
+```
+
+Create it with:
+```bash
+aws secretsmanager create-secret \
+  --name digilux-google-home-oauth \
+  --region ap-south-1 \
+  --secret-string '{"client_id":"YOUR_CLIENT_ID","client_secret":"YOUR_CLIENT_SECRET"}'
+```
+
+---
+
+### Sample `.env` (for local testing / deploy script reference)
+
+```bash
+# Shared
+DATA_REGION=ap-south-1
+LOG_LEVEL=INFO
+
+# Google OAuth credentials (from Google Cloud Console)
+GOOGLE_AGENT_ID=digilux-smarthome
+GOOGLE_CLIENT_ID=123456789-abc.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET_ARN=arn:aws:secretsmanager:ap-south-1:986906626244:secret:digilux-google-home-oauth
+GOOGLE_REDIRECT_URI=https://iot.digilux.co.in/smarthome/google-home/oauth/authorize
+GOOGLE_SCOPE=profile
+
+# OAuth server
+OAUTH_BASE_URL=https://iot.digilux.co.in/smarthome
+ALLOWED_REDIRECT_URIS=https://oauth-redirect.googleusercontent.com/r/YOUR_PROJECT_ID,https://oauth-redirect-sandbox.googleusercontent.com/r/YOUR_PROJECT_ID
+
+# Cognito (for form-login fallback in oauth_authorize)
+COGNITO_USER_POOL_ID=ap-south-1_h1o8s7257
+COGNITO_CLIENT_ID=q7189jitfkk4ttesepkgls491
+COGNITO_REGION=ap-south-1
+
+# DynamoDB tables (defaults shown — only set if using non-default names)
+GH_SESSIONS_TABLE=google_home_link_sessions
+GH_AUTH_CODES_TABLE=google_home_auth_codes
+GH_TOKENS_TABLE=google_home_tokens
+USER_DEVICE_MAPPING_TABLE=digilux_honeywell_user_device_mapping
+
+# TTLs (defaults shown — only set to override)
+SESSION_TTL_SECONDS=600
+AUTH_CODE_TTL_SECONDS=300
+ACCESS_TOKEN_TTL_SECONDS=3600
+REFRESH_TOKEN_TTL_SECONDS=15552000
+HTTP_TIMEOUT=10
+```
+
+---
+
+## 13. Contact
 
 For backend/API questions, contact the backend team. Do not call the Google OAuth endpoints (`/google-home/oauth/authorize`, `/google-home/oauth/token`, `/google-home/fulfillment`) directly from the app — these are called by Google, not by Flutter.
