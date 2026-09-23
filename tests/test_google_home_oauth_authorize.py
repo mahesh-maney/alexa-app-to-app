@@ -352,6 +352,205 @@ class TestConfigError:
         assert r["statusCode"] == 500
 
 
+# ── App Flip — Bearer token path ──────────────────────────────────────────────
+def _app_flip_event(
+    token="valid-access-token",
+    client_id=CLIENT_ID,
+    redirect_uri=REDIRECT_URI,
+    state=GOOGLE_STATE,
+    scope="profile",
+    method="POST",
+    use_query_params=False,
+):
+    """Build an App Flip event: Bearer Authorization header + JSON body (or query params)."""
+    params = {
+        "client_id":     client_id,
+        "redirect_uri":  redirect_uri,
+        "state":         state,
+        "scope":         scope,
+        "response_type": "code",
+    }
+    event = {
+        "httpMethod": method,
+        "path": "/google-home/oauth/authorize",
+        "headers": {"Authorization": f"Bearer {token}"},
+    }
+    if use_query_params:
+        event["queryStringParameters"] = params
+    else:
+        event["body"] = json.dumps(params)
+    return event
+
+
+class TestAppFlip:
+    # ── Positive cases ──────────────────────────────────────────────────────
+
+    def test_valid_token_returns_200_json(self):
+        """Valid Bearer token → 200 with JSON code + state (not an HTML redirect)."""
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code"):
+                r = m.lambda_handler(_app_flip_event(), MagicMock())
+        assert r["statusCode"] == 200
+        assert "application/json" in r["headers"]["Content-Type"]
+
+    def test_response_contains_code(self):
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code"):
+                r = m.lambda_handler(_app_flip_event(), MagicMock())
+        body = json.loads(r["body"])
+        assert "code" in body
+        assert len(body["code"]) > 8
+
+    def test_response_echoes_state(self):
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code"):
+                r = m.lambda_handler(_app_flip_event(state=GOOGLE_STATE), MagicMock())
+        body = json.loads(r["body"])
+        assert body["state"] == GOOGLE_STATE
+
+    def test_store_auth_code_called_with_correct_user_id(self):
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code") as mock_store:
+                m.lambda_handler(_app_flip_event(), MagicMock())
+        mock_store.assert_called_once()
+        assert mock_store.call_args[0][1] == USER_ID  # (code, userId, redirect_uri, scope)
+
+    def test_store_auth_code_called_with_correct_redirect_uri(self):
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code") as mock_store:
+                m.lambda_handler(_app_flip_event(redirect_uri=REDIRECT_URI), MagicMock())
+        assert mock_store.call_args[0][2] == REDIRECT_URI
+
+    def test_oauth_params_from_query_string_work(self):
+        """App Flip also works with OAuth params in the query string (GET + Bearer)."""
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code"):
+                r = m.lambda_handler(
+                    _app_flip_event(method="GET", use_query_params=True), MagicMock()
+                )
+        assert r["statusCode"] == 200
+        body = json.loads(r["body"])
+        assert "code" in body
+
+    def test_bearer_header_case_insensitive(self):
+        """Authorization header key is case-insensitive."""
+        m = _load()
+        event = _app_flip_event()
+        event["headers"] = {"authorization": f"Bearer valid-token"}
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code"):
+                r = m.lambda_handler(event, MagicMock())
+        assert r["statusCode"] == 200
+
+    def test_malformed_json_body_falls_back_to_empty_params(self):
+        """Malformed body doesn't crash — returns 400 for missing client_id."""
+        m = _load()
+        event = _app_flip_event()
+        event["body"] = "not-json{"
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            r = m.lambda_handler(event, MagicMock())
+        # client_id will be empty → invalid_client
+        assert r["statusCode"] == 400
+        body = json.loads(r["body"])
+        assert body["error"] == "invalid_client"
+
+    # ── Negative cases ──────────────────────────────────────────────────────
+
+    def test_invalid_token_returns_401(self):
+        """Cognito rejects the token → 401 JSON, no auth code issued."""
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=None):
+            r = m.lambda_handler(_app_flip_event(token="expired-token"), MagicMock())
+        assert r["statusCode"] == 401
+        body = json.loads(r["body"])
+        assert body["error"] == "unauthorized"
+
+    def test_invalid_token_does_not_store_auth_code(self):
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=None):
+            with patch.object(m, "_store_auth_code") as mock_store:
+                m.lambda_handler(_app_flip_event(token="bad"), MagicMock())
+        mock_store.assert_not_called()
+
+    def test_wrong_client_id_returns_400(self):
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            r = m.lambda_handler(_app_flip_event(client_id="wrong-client"), MagicMock())
+        assert r["statusCode"] == 400
+        body = json.loads(r["body"])
+        assert body["error"] == "invalid_client"
+
+    def test_wrong_redirect_uri_returns_400_when_allow_list_set(self):
+        original = os.environ.get("ALLOWED_REDIRECT_URIS")
+        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
+        try:
+            m = _load()
+            with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+                r = m.lambda_handler(
+                    _app_flip_event(redirect_uri="https://evil.com/steal"), MagicMock()
+                )
+        finally:
+            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
+        assert r["statusCode"] == 400
+        body = json.loads(r["body"])
+        assert body["error"] == "invalid_redirect_uri"
+
+    def test_wrong_redirect_uri_does_not_store_auth_code(self):
+        original = os.environ.get("ALLOWED_REDIRECT_URIS")
+        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
+        try:
+            m = _load()
+            with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+                with patch.object(m, "_store_auth_code") as mock_store:
+                    m.lambda_handler(
+                        _app_flip_event(redirect_uri="https://evil.com/steal"), MagicMock()
+                    )
+        finally:
+            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
+        mock_store.assert_not_called()
+
+    def test_ddb_failure_returns_500(self):
+        """If DynamoDB write fails, return 500 — don't crash or redirect."""
+        m = _load()
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            with patch.object(m, "_store_auth_code", side_effect=Exception("DDB timeout")):
+                r = m.lambda_handler(_app_flip_event(), MagicMock())
+        assert r["statusCode"] == 500
+        body = json.loads(r["body"])
+        assert body["error"] == "server_error"
+
+    def test_empty_body_and_no_query_params_returns_400(self):
+        """No OAuth params at all → invalid_client (empty client_id)."""
+        m = _load()
+        event = {
+            "httpMethod": "POST",
+            "path": "/google-home/oauth/authorize",
+            "headers": {"Authorization": "Bearer valid-token"},
+            "body": "{}",
+        }
+        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
+            r = m.lambda_handler(event, MagicMock())
+        assert r["statusCode"] == 400
+
+    def test_no_bearer_prefix_is_not_app_flip_goes_to_normal_flow(self):
+        """A non-Bearer Authorization header (e.g. Basic) must NOT trigger App Flip."""
+        m = _load()
+        event = _app_flip_event()
+        event["headers"] = {"Authorization": "Basic dXNlcjpwYXNz"}
+        with patch.object(m, "_get_session_user", return_value=None):
+            r = m.lambda_handler(event, MagicMock())
+        # Falls through to GET/POST normal handler (login form = 200 HTML or 302)
+        assert r["statusCode"] in (200, 302, 400, 405)
+        # Must NOT be the JSON App Flip response
+        assert "application/json" not in r["headers"].get("Content-Type", "")
+
+
 # ── Method not allowed ────────────────────────────────────────────────────────
 class TestMethodNotAllowed:
     def test_put_method_returns_405(self):

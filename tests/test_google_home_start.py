@@ -131,7 +131,7 @@ class TestSessionCreation:
         r, _, _ = _run_ok()
         body = json.loads(r["body"])
         assert "homeAppDeepLink" in body
-        assert "madeby.google.com" in body["homeAppDeepLink"]
+        assert "home.google.com" in body["homeAppDeepLink"]
 
     def test_deep_link_contains_agent_id(self):
         r, m, _ = _run_ok()

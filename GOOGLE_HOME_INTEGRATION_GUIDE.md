@@ -95,7 +95,7 @@ No request body required.
 {
   "state":           "a3f2c1d0-e4b5-4678-9abc-def012345678",
   "agentId":         "digilux-smarthome",
-  "homeAppDeepLink": "https://madeby.google.com/home-app/?deeplink=setup%2Fha_linking%3Fagent_id%3Ddigilux-smarthome",
+  "homeAppDeepLink": "https://home.google.com/home-app/?deeplink=setup%2Fha_linking%3Fagent_id%3Ddigilux-smarthome",
   "webFallbackUrl":  "https://iot.digilux.co.in/smarthome/google-home/oauth/authorize?pre_auth_state=a3f2c1d0-...&response_type=code&client_id=..."
 }
 ```

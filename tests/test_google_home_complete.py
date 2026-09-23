@@ -210,7 +210,7 @@ class TestLinkStatus:
     def test_linked_at_included_when_in_token_record(self):
         r, _, _ = _run_with_ddb(_session(), _token_record(linked_at="1700001234"))
         body = json.loads(r["body"])
-        assert body.get("linkedAt") == "1700001234"
+        assert body.get("linkedAt") == 1700001234
 
     def test_agent_id_omitted_when_not_in_token_record(self):
         r, _, _ = _run_with_ddb(_session(), {"userId": USER_ID})

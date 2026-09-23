@@ -48,6 +48,10 @@ _REGION              = os.environ.get("DATA_REGION", "")
 _TOKENS_TABLE        = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
 _DEVICE_MAPPING_TABLE = os.environ.get("USER_DEVICE_MAPPING_TABLE",
                                        "digilux_honeywell_user_device_mapping")
+# DynamoDB GSI name on google_home_tokens used to look up userId by accessToken
+_TOKENS_ACCESS_TOKEN_INDEX = os.environ.get("GH_TOKENS_ACCESS_TOKEN_INDEX", "accessToken-index")
+# Manufacturer label returned in Google Home SYNC device descriptors
+_DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "Digilux")
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
@@ -62,8 +66,9 @@ if _missing_vars:
 else:
     logger.info(
         "CONFIG_OK function=google_home_fulfillment region=%s "
-        "tokens_table=%s device_mapping_table=%s",
-        _REGION, _TOKENS_TABLE, _DEVICE_MAPPING_TABLE,
+        "tokens_table=%s tokens_index=%s device_mapping_table=%s manufacturer=%s",
+        _REGION, _TOKENS_TABLE, _TOKENS_ACCESS_TOKEN_INDEX,
+        _DEVICE_MAPPING_TABLE, _DEVICE_MANUFACTURER,
     )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
@@ -73,7 +78,11 @@ _dynamodb = None
 def _ddb():
     global _dynamodb
     if _dynamodb is None:
+        logger.debug("DDB_CLIENT_INIT region=%s (cold start)", _REGION)
         _dynamodb = boto3.resource("dynamodb", region_name=_REGION)
+        logger.info("DDB_CLIENT_READY region=%s", _REGION)
+    else:
+        logger.debug("DDB_CLIENT_REUSE (warm container)")
     return _dynamodb
 
 
@@ -86,7 +95,7 @@ def _resolve_user_id(access_token: str) -> str | None:
     """
     try:
         resp = _ddb().Table(_TOKENS_TABLE).query(
-            IndexName="accessToken-index",
+            IndexName=_TOKENS_ACCESS_TOKEN_INDEX,
             KeyConditionExpression="accessToken = :at",
             ExpressionAttributeValues={":at": access_token},
             Limit=1,
@@ -162,7 +171,7 @@ def _get_user_devices(user_id: str) -> list[dict]:
                 "sceneReversible": False,
             },
             "deviceInfo": {
-                "manufacturer": "Digilux",
+                "manufacturer": _DEVICE_MANUFACTURER,
             },
             "customData": {
                 "siteId": site_id,
@@ -281,31 +290,46 @@ _INTENT_HANDLERS = {
 
 def lambda_handler(event, context):  # noqa: ANN001
     request_id = getattr(context, "aws_request_id", "local")
-    logger.info("REQUEST_START function=google_home_fulfillment request_id=%s", request_id)
+    source_ip  = (event.get("requestContext") or {}).get("identity", {}).get("sourceIp", "")
+    logger.info(
+        "REQUEST_START function=google_home_fulfillment source_ip=%s request_id=%s",
+        source_ip, request_id,
+    )
 
     if _missing_vars:
+        logger.error("CONFIG_ERROR missing=%s request_id=%s", _missing_vars, request_id)
+        _audit("GH_FULFILLMENT_CONFIG_ERROR", missing=str(_missing_vars), request_id=request_id)
         return _resp(500, {"error": "Server configuration error"})
 
     # ── 1. Authenticate via Bearer token ──────────────────────────────────────
     headers = event.get("headers") or {}
     auth = headers.get("Authorization") or headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
-        logger.warning("MISSING_BEARER_TOKEN request_id=%s", request_id)
+        logger.warning(
+            "MISSING_BEARER_TOKEN source_ip=%s request_id=%s", source_ip, request_id,
+        )
+        _audit("GH_FULFILLMENT_AUTH_MISSING", source_ip=source_ip, request_id=request_id)
         return _resp(401, {"error": "Unauthorized"})
 
     access_token = auth.split(" ", 1)[1].strip()
     user_id = _resolve_user_id(access_token)
     if not user_id:
-        logger.warning("INVALID_OR_EXPIRED_TOKEN token=%s... request_id=%s",
-                       access_token[:8], request_id)
+        logger.warning(
+            "INVALID_OR_EXPIRED_TOKEN token=%s... source_ip=%s request_id=%s",
+            access_token[:8], source_ip, request_id,
+        )
+        _audit("GH_FULFILLMENT_AUTH_FAILED", token_prefix=access_token[:8],
+               source_ip=source_ip, request_id=request_id)
         return _resp(401, {"error": "Unauthorized"})
 
     logger.info("AUTH_OK userId=%s request_id=%s", user_id, request_id)
+    _audit("GH_FULFILLMENT_AUTH_OK", userId=user_id, request_id=request_id)
 
     # ── 2. Parse request body ──────────────────────────────────────────────────
     try:
         body = json.loads(event.get("body") or "{}")
-    except Exception:
+    except Exception as exc:
+        logger.warning("BODY_PARSE_ERROR reason=%s request_id=%s", exc, request_id)
         return _resp(400, {"error": "Invalid JSON body"})
 
     # Override request_id with Google's requestId if present
@@ -334,8 +358,10 @@ def lambda_handler(event, context):  # noqa: ANN001
     try:
         result = handler(payload_in, user_id, google_request_id)
     except Exception as exc:
-        logger.error("INTENT_HANDLER_ERROR intent=%s error=%s userId=%s",
-                     intent, exc, user_id)
+        logger.error("INTENT_HANDLER_ERROR intent=%s error=%s userId=%s request_id=%s",
+                     intent, exc, user_id, google_request_id)
+        _audit("GH_FULFILLMENT_HANDLER_ERROR", intent=intent, userId=user_id,
+               error=str(exc), request_id=google_request_id)
         return _resp(500, {"error": "Internal server error"})
 
     logger.info("REQUEST_OK function=google_home_fulfillment intent=%s userId=%s",

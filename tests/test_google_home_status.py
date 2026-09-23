@@ -156,7 +156,7 @@ class TestLinked:
 
     def test_linked_at_from_record(self):
         r, _ = _run_with_ddb(_token_record(linked_at="1700001234"))
-        assert json.loads(r["body"])["linkedAt"] == "1700001234"
+        assert json.loads(r["body"])["linkedAt"] == 1700001234
 
     def test_agent_id_omitted_when_not_in_record(self):
         r, _ = _run_with_ddb({"userId": USER_ID, "linkedAt": "123"})

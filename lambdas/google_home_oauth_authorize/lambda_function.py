@@ -62,7 +62,7 @@ _ALLOWED_REDIRECTS   = set(
     u.strip() for u in os.environ.get("ALLOWED_REDIRECT_URIS", "").split(",") if u.strip()
 )
 _COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
-_COGNITO_REGION       = os.environ.get("COGNITO_REGION", _REGION or "ap-south-1")
+_COGNITO_REGION       = os.environ.get("COGNITO_REGION", _REGION)
 _COGNITO_CLIENT_ID    = os.environ.get("COGNITO_CLIENT_ID", "")
 _AUTH_CODE_TTL_S      = int(os.environ.get("AUTH_CODE_TTL_SECONDS", "300"))
 _APP_NAME             = os.environ.get("APP_NAME", "Digilux Smart Home")
@@ -105,15 +105,86 @@ _cognito_cache = None
 def _ddb():
     global _dynamodb
     if _dynamodb is None:
+        logger.debug("DDB_CLIENT_INIT region=%s (cold start)", _REGION)
         _dynamodb = boto3.resource("dynamodb", region_name=_REGION)
+        logger.info("DDB_CLIENT_READY region=%s", _REGION)
+    else:
+        logger.debug("DDB_CLIENT_REUSE (warm container)")
     return _dynamodb
 
 
 def _cognito():
     global _cognito_cache
     if _cognito_cache is None:
+        logger.debug("COGNITO_CLIENT_INIT region=%s (cold start)", _COGNITO_REGION)
         _cognito_cache = boto3.client("cognito-idp", region_name=_COGNITO_REGION)
+        logger.info("COGNITO_CLIENT_READY region=%s", _COGNITO_REGION)
+    else:
+        logger.debug("COGNITO_CLIENT_REUSE (warm container)")
     return _cognito_cache
+
+
+def _validate_cognito_access_token(access_token: str) -> str | None:
+    """
+    Validate a Cognito access token for App Flip.
+
+    Primary:  Cognito get_user (full server-side validation — signature, expiry, revocation).
+    Fallback: Local JWT decode with issuer + token_use checks.
+              Hosted UI access tokens with resource-server scopes are rejected by get_user
+              when aws.cognito.signin.user.admin is not included; the fallback handles these.
+    """
+    # ── Primary: Cognito get_user ──────────────────────────────────────────────
+    try:
+        resp = _cognito().get_user(AccessToken=access_token)
+        sub = next(
+            (attr["Value"] for attr in resp.get("UserAttributes", [])
+             if attr["Name"] == "sub"),
+            None,
+        )
+        user_id = sub or resp.get("Username", "") or None
+        if user_id:
+            logger.info("APP_FLIP_TOKEN_VALID_GET_USER sub=%s", user_id)
+        return user_id
+    except Exception as exc:
+        logger.warning("APP_FLIP_GET_USER_FAILED reason=%s — trying JWT decode", exc)
+
+    # ── Fallback: local JWT decode ─────────────────────────────────────────────
+    try:
+        parts = access_token.split(".")
+        if len(parts) != 3:
+            logger.warning("APP_FLIP_JWT_INVALID_FORMAT parts=%d", len(parts))
+            return None
+        padding = "=" * (4 - len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + padding))
+
+        # Verify issuer matches our user pool
+        expected_iss = (
+            f"https://cognito-idp.{_COGNITO_REGION}.amazonaws.com/{_COGNITO_USER_POOL_ID}"
+        )
+        if _COGNITO_USER_POOL_ID and claims.get("iss") != expected_iss:
+            logger.warning(
+                "APP_FLIP_JWT_ISS_MISMATCH iss=%s expected=%s",
+                claims.get("iss"), expected_iss,
+            )
+            return None
+
+        # Must be an access token, not an ID token
+        if claims.get("token_use") != "access":
+            logger.warning("APP_FLIP_NOT_ACCESS_TOKEN token_use=%s", claims.get("token_use"))
+            return None
+
+        # Basic expiry check
+        if claims.get("exp", 0) < int(time.time()):
+            logger.warning("APP_FLIP_JWT_EXPIRED exp=%d", claims.get("exp", 0))
+            return None
+
+        user_id = claims.get("sub") or claims.get("username") or None
+        if user_id:
+            logger.info("APP_FLIP_TOKEN_VALID_JWT_DECODE sub=%s", user_id)
+        return user_id
+    except Exception as exc:
+        logger.warning("APP_FLIP_JWT_DECODE_FAILED reason=%s", exc)
+        return None
 
 
 # ── OAuth validation helpers ───────────────────────────────────────────────────
@@ -366,7 +437,15 @@ def lambda_handler(event, context):  # noqa: ANN001
                 method, request_id)
 
     if _missing_vars:
+        logger.error("CONFIG_ERROR missing=%s request_id=%s", _missing_vars, request_id)
+        _audit("GH_AUTHORIZE_CONFIG_ERROR", missing=str(_missing_vars), request_id=request_id)
         return _html_resp(500, _error_page("Server configuration error. Please try again later."))
+
+    # ── App Flip: native Android app sends Bearer token instead of form creds ──
+    headers = event.get("headers") or {}
+    auth_header = (headers.get("Authorization") or headers.get("authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return _handle_app_flip(event, request_id, auth_header.split(" ", 1)[1].strip())
 
     if method == "GET":
         return _handle_get(event, request_id)
@@ -374,6 +453,78 @@ def lambda_handler(event, context):  # noqa: ANN001
         return _handle_post(event, request_id)
     else:
         return _html_resp(405, _error_page("Method not allowed."))
+
+
+def _handle_app_flip(event: dict, request_id: str, token: str) -> dict:
+    """
+    App Flip path: the Flutter app's GoogleHomeAppFlipActivity sends the user's
+    Cognito access token to prove identity, bypassing the web login form.
+    Validates the token via Cognito get_user, issues an auth code, and returns
+    JSON {"code": "...", "state": "..."} for the Activity to relay back to Google.
+    """
+    logger.info("APP_FLIP_START request_id=%s", request_id)
+
+    user_id = _validate_cognito_access_token(token)
+    if not user_id:
+        _audit("GH_APP_FLIP_AUTH_FAILED", request_id=request_id)
+        return _json_resp(401, {"error": "unauthorized",
+                                "error_description": "Invalid or expired token"})
+
+    # Read OAuth params from JSON body (POST) or query string (GET).
+    body_raw = event.get("body") or ""
+    if event.get("isBase64Encoded") and body_raw:
+        body_raw = base64.b64decode(body_raw).decode()
+    try:
+        body = json.loads(body_raw) if body_raw.strip() else {}
+    except Exception:
+        body = {}
+
+    params      = event.get("queryStringParameters") or {}
+    client_id   = (body.get("client_id")   or params.get("client_id",   "")).strip()
+    redirect_uri= (body.get("redirect_uri") or params.get("redirect_uri","")).strip()
+    state       = (body.get("state")        or params.get("state",       "")).strip()
+    scope       = (body.get("scope")        or params.get("scope",  "profile")).strip()
+
+    debug_intent = body.get("_debug_intent", {})
+    logger.info("APP_FLIP_PARAMS userId=%s client_id=%s redirect_uri=%s request_id=%s",
+                user_id, client_id, redirect_uri, request_id)
+    if debug_intent:
+        logger.info("APP_FLIP_INTENT_DUMP %s request_id=%s", json.dumps(debug_intent), request_id)
+
+    if not _validate_client_id(client_id):
+        _audit("GH_APP_FLIP_INVALID_CLIENT", userId=user_id, request_id=request_id)
+        return _json_resp(400, {"error": "invalid_client"})
+
+    if not _validate_redirect_uri(redirect_uri):
+        _audit("GH_APP_FLIP_INVALID_REDIRECT", userId=user_id,
+               redirect_uri=redirect_uri, request_id=request_id)
+        return _json_resp(400, {"error": "invalid_redirect_uri"})
+
+    code = _generate_auth_code()
+    try:
+        _store_auth_code(code, user_id, redirect_uri, scope)
+    except Exception as exc:
+        logger.error("APP_FLIP_CODE_STORE_ERROR error=%s userId=%s request_id=%s",
+                     exc, user_id, request_id)
+        return _json_resp(500, {"error": "server_error"})
+
+    _audit("GH_APP_FLIP_CODE_ISSUED", userId=user_id, code_prefix=code[:8],
+           redirect_uri=redirect_uri, request_id=request_id)
+    logger.info("APP_FLIP_OK userId=%s code_prefix=%s request_id=%s",
+                user_id, code[:8], request_id)
+
+    return _json_resp(200, {"code": code, "state": state})
+
+
+def _json_resp(status_code: int, body: dict) -> dict:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps(body),
+    }
 
 
 def _handle_get(event: dict, request_id: str) -> dict:

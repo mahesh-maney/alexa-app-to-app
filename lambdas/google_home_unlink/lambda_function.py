@@ -38,8 +38,12 @@ def _audit(event: str, **fields) -> None:
 _REGION           = os.environ.get("DATA_REGION", "")
 _TOKENS_TABLE     = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
 _GH_SECRET_ARN    = os.environ.get("GOOGLE_CLIENT_SECRET_ARN", "")
-_GH_SECRET_REGION = os.environ.get("GOOGLE_SECRET_REGION", "ap-south-1")
+_GH_SECRET_REGION = os.environ.get("GOOGLE_SECRET_REGION", "")
 _HTTP_TIMEOUT     = int(os.environ.get("HTTP_TIMEOUT", "10"))
+# Google token revocation endpoint — override if Google changes the URL
+_GH_TOKEN_REVOKE_URL = os.environ.get(
+    "GH_TOKEN_REVOKE_URL", "https://oauth2.googleapis.com/revoke"
+)
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
@@ -53,14 +57,20 @@ if _missing_vars:
 else:
     logger.info(
         "CONFIG_OK function=google_home_unlink region=%s tokens_table=%s "
-        "token_revocation_configured=%s http_timeout=%d",
-        _REGION, _TOKENS_TABLE, bool(_GH_SECRET_ARN), _HTTP_TIMEOUT,
+        "token_revocation_configured=%s http_timeout=%d revoke_url=%s",
+        _REGION, _TOKENS_TABLE, bool(_GH_SECRET_ARN), _HTTP_TIMEOUT, _GH_TOKEN_REVOKE_URL,
     )
 
 if not _GH_SECRET_ARN:
     logger.warning(
         "CONFIG_WARNING GOOGLE_CLIENT_SECRET_ARN not set — "
         "token revocation with Google will be skipped on unlink"
+    )
+
+if not _GH_SECRET_REGION:
+    logger.warning(
+        "CONFIG_WARNING GOOGLE_SECRET_REGION not set — "
+        "will use default boto3 region for Secrets Manager"
     )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
@@ -150,7 +160,7 @@ def _revoke_google_token(access_token: str, user_id: str) -> None:
     Endpoint: POST https://oauth2.googleapis.com/revoke
     Errors are logged but do NOT block the unlink operation.
     """
-    url = "https://oauth2.googleapis.com/revoke"
+    url = _GH_TOKEN_REVOKE_URL
     logger.debug(
         "GH_TOKEN_REVOKE_START url=%s token_prefix=%s... userId=%s",
         url, access_token[:8], user_id,

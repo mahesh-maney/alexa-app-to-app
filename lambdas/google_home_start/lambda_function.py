@@ -41,14 +41,19 @@ def _audit(event: str, **fields) -> None:
 
 
 # ── Environment variables ──────────────────────────────────────────────────────
-_REGION         = os.environ.get("DATA_REGION", "")
-_SESSIONS_TABLE = os.environ.get("GH_SESSIONS_TABLE", "google_home_link_sessions")
-_SESSION_TTL_S  = int(os.environ.get("SESSION_TTL_SECONDS", "600"))
-_AGENT_ID       = os.environ.get("GOOGLE_AGENT_ID", "")
-_OAUTH_BASE_URL = os.environ.get("OAUTH_BASE_URL", "")
-_GH_CLIENT_ID   = os.environ.get("GOOGLE_CLIENT_ID", "")
-_GH_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "")
-_GH_SCOPE       = os.environ.get("GOOGLE_SCOPE", "profile")
+_REGION              = os.environ.get("DATA_REGION", "")
+_SESSIONS_TABLE      = os.environ.get("GH_SESSIONS_TABLE", "google_home_link_sessions")
+_SESSION_TTL_S       = int(os.environ.get("SESSION_TTL_SECONDS", "600"))
+_AGENT_ID            = os.environ.get("GOOGLE_AGENT_ID", "")
+_OAUTH_BASE_URL      = os.environ.get("OAUTH_BASE_URL", "")
+_GH_CLIENT_ID        = os.environ.get("GOOGLE_CLIENT_ID", "")
+_GH_REDIRECT_URI     = os.environ.get("GOOGLE_REDIRECT_URI", "")
+_GH_SCOPE            = os.environ.get("GOOGLE_SCOPE", "profile")
+# Deep-link URL template — override if Google changes their scheme
+_GH_DEEP_LINK_BASE   = os.environ.get(
+    "GH_DEEP_LINK_BASE_URL", "https://home.google.com/home-app/"
+)
+_GH_DEEP_LINK_PATH   = os.environ.get("GH_DEEP_LINK_PATH", "setup/ha_linking")
 
 _REQUIRED_VARS = {
     "DATA_REGION":     _REGION,
@@ -68,8 +73,9 @@ else:
     logger.info(
         "CONFIG_OK function=google_home_start region=%s sessions_table=%s "
         "agent_id=%s ttl_seconds=%d oauth_base_url=%s "
-        "web_fallback_configured=%s",
+        "deep_link_base=%s deep_link_path=%s web_fallback_configured=%s",
         _REGION, _SESSIONS_TABLE, _AGENT_ID, _SESSION_TTL_S, _OAUTH_BASE_URL,
+        _GH_DEEP_LINK_BASE, _GH_DEEP_LINK_PATH,
         bool(_GH_CLIENT_ID and _GH_REDIRECT_URI),
     )
 
@@ -128,8 +134,9 @@ def _decode_jwt_sub(token: str) -> str:
 def _build_home_app_deep_link(agent_id: str) -> str:
     """Build the Google Home app deep link for account linking."""
     inner = urllib.parse.urlencode({"agent_id": agent_id})
-    deeplink_value = urllib.parse.quote(f"setup/ha_linking?{inner}", safe="")
-    url = f"https://madeby.google.com/home-app/?deeplink={deeplink_value}"
+    deeplink_value = urllib.parse.quote(f"{_GH_DEEP_LINK_PATH}?{inner}", safe="")
+    base = _GH_DEEP_LINK_BASE.rstrip("/")
+    url = f"{base}/?deeplink={deeplink_value}"
     logger.debug("GHA_DEEP_LINK_BUILT agent_id=%s url=%s", agent_id, url)
     return url
 

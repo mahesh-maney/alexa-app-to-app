@@ -285,7 +285,7 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     linked    = bool(token_record)
     agent_id  = (token_record or {}).get("agentId", "")
-    linked_at = (token_record or {}).get("linkedAt", "")
+    linked_at = int((token_record or {}).get("linkedAt", 0)) or ""
     scope     = (token_record or {}).get("scope", "")
 
     logger.info(
