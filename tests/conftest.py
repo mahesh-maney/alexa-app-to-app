@@ -64,6 +64,6 @@ os.environ.setdefault("USER_DEVICE_MAPPING_TABLE",    "digilux_honeywell_user_de
 os.environ.setdefault("HTTP_TIMEOUT",                 "10")
 os.environ.setdefault("GH_DEEP_LINK_BASE_URL",        "https://home.google.com/home-app/")
 os.environ.setdefault("GH_DEEP_LINK_PATH",            "setup/ha_linking")
-os.environ.setdefault("GH_TOKEN_REVOKE_URL",          "https://oauth2.googleapis.com/revoke")
 os.environ.setdefault("GH_TOKENS_ACCESS_TOKEN_INDEX", "accessToken-index")
+os.environ.setdefault("GOOGLE_SA_KEY_SECRET_ARN",     "")   # empty = Home Graph unlink skipped in tests
 os.environ.setdefault("DEVICE_MANUFACTURER",          "Digilux")

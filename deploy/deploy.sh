@@ -117,7 +117,7 @@ REFRESH_TOKEN_TTL_SECONDS=$(cfg REFRESH_TOKEN_TTL_SECONDS)
 GH_TOKENS_ACCESS_TOKEN_INDEX=$(cfg GH_TOKENS_ACCESS_TOKEN_INDEX)
 GH_DEEP_LINK_BASE_URL=$(cfg GH_DEEP_LINK_BASE_URL)
 GH_DEEP_LINK_PATH=$(cfg GH_DEEP_LINK_PATH)
-GH_TOKEN_REVOKE_URL=$(cfg GH_TOKEN_REVOKE_URL)
+GOOGLE_SA_KEY_SECRET_ARN=$(cfg GOOGLE_SA_KEY_SECRET_ARN)
 
 DEPLOY_ALEXA=0; DEPLOY_GOOGLE=0
 case "$DEPLOY_TARGET" in
@@ -252,8 +252,22 @@ package_lambda() {
   local OUT="${BUILD_DIR}/${NAME}.zip"
   mkdir -p "$BUILD_DIR"
   rm -f "$OUT"
-  (cd "$SRC_DIR" && zip -qr "$OUT" . -x "__pycache__/*" "*.pyc" "tests/*")
-  _info "Packaged ${NAME} ($(du -sh "$OUT" | cut -f1))"
+  # Install Python requirements if present (needed for lambdas with native deps,
+  # e.g. google_home_unlink uses 'cryptography' for Home Graph JWT signing).
+  if [ -f "${SRC_DIR}/requirements.txt" ]; then
+    local DEPS_DIR="${BUILD_DIR}/${NAME}_deps"
+    rm -rf "$DEPS_DIR" && mkdir -p "$DEPS_DIR"
+    # Prefer Linux/Lambda-compatible binary wheels; fall back to local build.
+    pip install -q -r "${SRC_DIR}/requirements.txt" -t "$DEPS_DIR" \
+        --platform manylinux2014_x86_64 --python-version 3.12 \
+        --only-binary=:all: --implementation cp 2>/dev/null \
+      || pip install -q -r "${SRC_DIR}/requirements.txt" -t "$DEPS_DIR" 2>/dev/null
+    (cd "$DEPS_DIR" && zip -qr "$OUT" . \
+        -x "*.pyc" "__pycache__/*" "*.dist-info/*" "*.egg-info/*")
+    echo -e "  ${CYAN}→${NC} Packaged ${NAME} deps ($(du -sh "$DEPS_DIR" | cut -f1))" >&2
+  fi
+  (cd "$SRC_DIR" && zip -qr "$OUT" . -x "__pycache__/*" "*.pyc" "tests/*" "requirements.txt")
+  echo -e "  ${CYAN}→${NC} Packaged ${NAME} ($(du -sh "$OUT" | cut -f1))" >&2
   echo "$OUT"
 }
 
@@ -703,10 +717,18 @@ ROLE_GH_STATUS_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-status-role" "{
   ]
 }")
 
+# Build the Secrets Manager resource list for the unlink role.
+# Includes the SA key secret when GOOGLE_SA_KEY_SECRET_ARN is configured.
+if [ -n "${GOOGLE_SA_KEY_SECRET_ARN:-}" ]; then
+  _GH_UNLINK_SECRET_RESOURCE="[\"${GOOGLE_SECRET_ARN}\",\"${GOOGLE_SA_KEY_SECRET_ARN}\"]"
+else
+  _GH_UNLINK_SECRET_RESOURCE="\"${GOOGLE_SECRET_ARN}\""
+fi
+
 ROLE_GH_UNLINK_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-unlink-role" "{
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"${DDB_GH_TOKENS_ARN}\"},
-    {\"Sid\":\"Secret\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${GOOGLE_SECRET_ARN}\"},
+    {\"Sid\":\"Secret\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":${_GH_UNLINK_SECRET_RESOURCE}},
     {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
   ]
 }")
@@ -776,9 +798,8 @@ ZIP=$(package_lambda "google_home_unlink" "${LAMBDA_DIR}/google_home_unlink")
 deploy_lambda "google_home_unlink" "$ZIP" "$ROLE_GH_UNLINK_ARN" \
   "$(env_json "${GH_COMMON[@]}" \
     "GH_TOKENS_TABLE=${GH_TOKENS_TABLE}" \
-    "GOOGLE_CLIENT_SECRET_ARN=${GOOGLE_SECRET_ARN}" \
     "GOOGLE_SECRET_REGION=${GOOGLE_SECRET_REGION}" \
-    "GH_TOKEN_REVOKE_URL=${GH_TOKEN_REVOKE_URL}")" 15
+    "GOOGLE_SA_KEY_SECRET_ARN=${GOOGLE_SA_KEY_SECRET_ARN}")" 30
 
 ZIP=$(package_lambda "google_home_oauth_authorize" "${LAMBDA_DIR}/google_home_oauth_authorize")
 deploy_lambda "google_home_oauth_authorize" "$ZIP" "$ROLE_GH_AUTHORIZE_ARN" \

@@ -48,33 +48,29 @@ def _event(token=None):
     }
 
 
-def _token_record(access_token="at_abc123"):
+def _token_record():
     return {
         "userId":       USER_ID,
         "agentId":      "test-agent-id",
         "linkedAt":     "1700000000",
-        "accessToken":  access_token,
+        "accessToken":  "at_abc123",
         "refreshToken": "rt_abc123",
         "scope":        "profile",
     }
 
 
-def _run_unlink(record, mock_revoke=True):
+def _run_unlink(record):
     """Run unlink with a given token record (or None for already-unlinked).
-    Optionally mock _revoke_google_token to prevent HTTP calls."""
+    Always mocks _delete_agent_user to prevent outbound network calls."""
     m = _load()
-    with patch.object(m, "_ddb") as mock_ddb:
+    with patch.object(m, "_ddb") as mock_ddb, \
+         patch.object(m, "_delete_agent_user") as mock_delete_agent:
         mock_ddb.return_value.Table.return_value.get_item.return_value = (
             {"Item": record} if record is not None else {}
         )
         mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
-        if mock_revoke:
-            with patch.object(m, "_revoke_google_token") as mock_rev:
-                r = m.lambda_handler(_event(), MagicMock())
-            return r, m, mock_ddb, mock_rev
-        else:
-            r = m.lambda_handler(_event(), MagicMock())
-            return r, m, mock_ddb, None
+        r = m.lambda_handler(_event(), MagicMock())
+    return r, m, mock_ddb, mock_delete_agent
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -96,10 +92,10 @@ class TestAuth:
 
     def test_lowercase_authorization_header_accepted(self):
         m = _load()
-        with patch.object(m, "_ddb") as mock_ddb:
+        with patch.object(m, "_ddb") as mock_ddb, \
+             patch.object(m, "_delete_agent_user"):
             mock_ddb.return_value.Table.return_value.get_item.return_value = {}
-            with patch.object(m, "_revoke_google_token"):
-                r = m.lambda_handler({"headers": {"authorization": f"Bearer {VALID_TOKEN}"}}, MagicMock())
+            r = m.lambda_handler({"headers": {"authorization": f"Bearer {VALID_TOKEN}"}}, MagicMock())
         assert r["statusCode"] == 200
 
 
@@ -117,9 +113,9 @@ class TestAlreadyUnlinked:
         r, _, mock_ddb, _ = _run_unlink(None)
         mock_ddb.return_value.Table.return_value.delete_item.assert_not_called()
 
-    def test_revoke_not_called_when_no_record(self):
-        r, _, _, mock_rev = _run_unlink(None)
-        mock_rev.assert_not_called()
+    def test_delete_agent_user_not_called_when_no_record(self):
+        r, _, _, mock_delete_agent = _run_unlink(None)
+        mock_delete_agent.assert_not_called()
 
 
 # ── Successful unlink ─────────────────────────────────────────────────────────
@@ -140,73 +136,82 @@ class TestSuccessfulUnlink:
 
     def test_delete_item_called_on_tokens_table(self):
         r, m, mock_ddb, _ = _run_unlink(_token_record())
-        # Both get_item and delete_item go through the same mock Table
         mock_ddb.return_value.Table.assert_called_with(m._TOKENS_TABLE)
 
-    def test_revoke_called_when_access_token_present(self):
-        r, _, _, mock_rev = _run_unlink(_token_record(access_token="at_secret"))
-        mock_rev.assert_called_once_with("at_secret", USER_ID)
+    def test_delete_agent_user_called_with_user_id(self):
+        r, _, _, mock_delete_agent = _run_unlink(_token_record())
+        mock_delete_agent.assert_called_once_with(USER_ID)
 
-    def test_revoke_not_called_when_no_access_token(self):
-        record = {"userId": USER_ID, "agentId": "a"}  # no accessToken key
-        r, _, _, mock_rev = _run_unlink(record)
-        mock_rev.assert_not_called()
-
-    def test_unlink_succeeds_even_if_revoke_network_error(self):
-        """Even if the HTTP token revocation call fails, DDB delete still runs."""
-        import urllib.error
+    def test_unlink_succeeds_even_if_delete_agent_user_raises(self):
+        """Even if the Home Graph API call raises, DDB delete still runs."""
         m = _load()
-        with patch.object(m, "_ddb") as mock_ddb:
+        with patch.object(m, "_ddb") as mock_ddb, \
+             patch.object(m, "_delete_agent_user", side_effect=RuntimeError("network down")):
             mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _token_record()}
             mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
-            with patch("urllib.request.urlopen") as mock_urlopen:
-                mock_urlopen.side_effect = urllib.error.HTTPError(
-                    url="https://oauth2.googleapis.com/revoke",
-                    code=400, msg="Bad Request", hdrs=None, fp=None,
-                )
-                r = m.lambda_handler(_event(), MagicMock())
+            r = m.lambda_handler(_event(), MagicMock())
         mock_ddb.return_value.Table.return_value.delete_item.assert_called_once()
         assert r["statusCode"] == 200
 
 
-# ── Token revocation (unit tests for _revoke_google_token helper) ─────────────
-class TestRevokeGoogleToken:
-    def test_http_error_is_swallowed(self):
-        import urllib.error
+# ── _delete_agent_user (unit tests for the Home Graph helper) ─────────────────
+class TestDeleteAgentUser:
+    def test_skips_when_no_sa_key_configured(self):
+        """When GOOGLE_SA_KEY_SECRET_ARN is empty, skip without error."""
         m = _load()
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.side_effect = urllib.error.HTTPError(
-                url="https://oauth2.googleapis.com/revoke",
-                code=400,
-                msg="Bad Request",
-                hdrs=None,
-                fp=None,
-            )
+        with patch.object(m, "_GH_SA_KEY_SECRET_ARN", ""):
             # Should not raise
-            m._revoke_google_token("some_token", USER_ID)
+            m._delete_agent_user(USER_ID)
 
-    def test_url_error_is_swallowed(self):
+    def test_skips_when_sa_creds_empty(self):
+        """When _get_sa_credentials returns {}, skip without error."""
+        m = _load()
+        with patch.object(m, "_get_sa_credentials", return_value={}):
+            m._delete_agent_user(USER_ID)
+
+    def test_skips_when_sa_token_fetch_fails(self):
+        """When the service account token exchange fails, skip without error."""
+        m = _load()
+        sa_creds = {"client_email": "sa@test.iam.gserviceaccount.com", "private_key": "---"}
+        with patch.object(m, "_get_sa_credentials", return_value=sa_creds), \
+             patch.object(m, "_get_sa_access_token", side_effect=Exception("token error")):
+            m._delete_agent_user(USER_ID)
+
+    def test_home_graph_http_error_is_swallowed(self):
+        """Home Graph returning 4xx is logged but does not raise."""
         import urllib.error
         m = _load()
-        with patch("urllib.request.urlopen") as mock_open:
+        sa_creds = {"client_email": "sa@test.iam.gserviceaccount.com", "private_key": "---"}
+        with patch.object(m, "_get_sa_credentials", return_value=sa_creds), \
+             patch.object(m, "_get_sa_access_token", return_value="fake_sa_token"), \
+             patch("urllib.request.urlopen") as mock_open:
+            mock_open.side_effect = urllib.error.HTTPError(
+                url="https://homegraph.googleapis.com/v1/agentUsers/x",
+                code=403, msg="Forbidden", hdrs=None, fp=None,
+            )
+            m._delete_agent_user(USER_ID)  # must not raise
+
+    def test_home_graph_url_error_is_swallowed(self):
+        m = _load()
+        sa_creds = {"client_email": "sa@test.iam.gserviceaccount.com", "private_key": "---"}
+        with patch.object(m, "_get_sa_credentials", return_value=sa_creds), \
+             patch.object(m, "_get_sa_access_token", return_value="fake_sa_token"), \
+             patch("urllib.request.urlopen") as mock_open:
+            import urllib.error
             mock_open.side_effect = urllib.error.URLError("connection refused")
-            m._revoke_google_token("some_token", USER_ID)
+            m._delete_agent_user(USER_ID)
 
-    def test_unexpected_error_is_swallowed(self):
+    def test_home_graph_success(self):
         m = _load()
-        with patch("urllib.request.urlopen") as mock_open:
-            mock_open.side_effect = RuntimeError("unexpected")
-            m._revoke_google_token("some_token", USER_ID)
-
-    def test_successful_revoke_does_not_raise(self):
-        m = _load()
+        sa_creds = {"client_email": "sa@test.iam.gserviceaccount.com", "private_key": "---"}
         mock_resp = MagicMock()
         mock_resp.status = 200
-        mock_resp.read.return_value = b""
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            m._revoke_google_token("some_token", USER_ID)  # should not raise
+        with patch.object(m, "_get_sa_credentials", return_value=sa_creds), \
+             patch.object(m, "_get_sa_access_token", return_value="fake_sa_token"), \
+             patch("urllib.request.urlopen", return_value=mock_resp):
+            m._delete_agent_user(USER_ID)  # must not raise
 
 
 # ── DDB errors ────────────────────────────────────────────────────────────────
@@ -231,22 +236,22 @@ class TestDdbGetError:
 class TestDdbDeleteError:
     def test_client_error_on_delete_returns_500(self):
         m = _load()
-        with patch.object(m, "_ddb") as mock_ddb:
+        with patch.object(m, "_ddb") as mock_ddb, \
+             patch.object(m, "_delete_agent_user"):
             mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _token_record()}
             mock_ddb.return_value.Table.return_value.delete_item.side_effect = ClientError(
                 {"Error": {"Code": "InternalServerError", "Message": "x"}}, "DeleteItem"
             )
-            with patch.object(m, "_revoke_google_token"):
-                r = m.lambda_handler(_event(), MagicMock())
+            r = m.lambda_handler(_event(), MagicMock())
         assert r["statusCode"] == 500
 
     def test_unexpected_error_on_delete_returns_500(self):
         m = _load()
-        with patch.object(m, "_ddb") as mock_ddb:
+        with patch.object(m, "_ddb") as mock_ddb, \
+             patch.object(m, "_delete_agent_user"):
             mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _token_record()}
             mock_ddb.return_value.Table.return_value.delete_item.side_effect = RuntimeError("ddb down")
-            with patch.object(m, "_revoke_google_token"):
-                r = m.lambda_handler(_event(), MagicMock())
+            r = m.lambda_handler(_event(), MagicMock())
         assert r["statusCode"] == 500
 
 
