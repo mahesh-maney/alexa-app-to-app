@@ -1,0 +1,993 @@
+{
+  "info": {
+    "name": "Digilux — Google Home Cloud-to-Cloud",
+    "description": "API collection for the Google Home Cloud-to-Cloud account linking integration.\n\nFlutter-facing flow (run in order):\n  1. POST   /api/v1/voice/google-home/account-linking/deep-link/start  → get state + deep link\n  2. (User opens Google Home app or web OAuth, completes login)\n  3. GET    /api/v1/voice/google-home/account-linking                  → poll until linked=true\n  4. POST   /api/v1/voice/google-home/account-linking/deep-link/complete → finalise session\n  5. DELETE /api/v1/voice/google-home/account-linking                  → unlink\n\nGoogle-facing endpoints (called automatically by Google — for manual QA only):\n  - POST /google-home/oauth/authorize  (App Flip path)\n  - POST /google-home/oauth/token      (authorization_code + refresh_token)\n  - POST /google-home/fulfillment      (SYNC / QUERY / EXECUTE / DISCONNECT)\n\nVariables required:\n  - base_url          : API Gateway base URL (e.g. https://iot.digilux.co.in/smarthome)\n  - cognito_token     : Cognito ACCESS token from app login\n  - gh_state          : Auto-populated from the start response\n  - gh_client_id      : Google OAuth client ID (from env.digilux.qa.json)\n  - gh_client_secret  : Google OAuth client secret (from Secrets Manager)\n  - gh_auth_code      : Auth code issued by authorize endpoint (for token endpoint tests)\n  - gh_access_token   : Auto-populated from token endpoint response\n  - gh_refresh_token  : Auto-populated from token endpoint response",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://iot.digilux.co.in/smarthome",
+      "type": "string",
+      "description": "API Gateway base URL"
+    },
+    {
+      "key": "cognito_token",
+      "value": "PASTE_YOUR_COGNITO_ACCESS_TOKEN_HERE",
+      "type": "string",
+      "description": "Cognito ACCESS token (not ID token). Must include smarthome_server/read + write scopes."
+    },
+    {
+      "key": "gh_state",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by the Start request test script. Do not edit manually."
+    },
+    {
+      "key": "gh_client_id",
+      "value": "75gmuum6qhfjsedrvck809oie6",
+      "type": "string",
+      "description": "Google OAuth client ID for the Digilux agent (from env.digilux.qa.json)"
+    },
+    {
+      "key": "gh_client_secret",
+      "value": "PASTE_CLIENT_SECRET_HERE",
+      "type": "string",
+      "description": "Google OAuth client secret from Secrets Manager (digilux-google-home-oauth secret)"
+    },
+    {
+      "key": "gh_auth_code",
+      "value": "",
+      "type": "string",
+      "description": "Auth code issued by the authorize endpoint. Auto-populated when running the App Flip request."
+    },
+    {
+      "key": "gh_access_token",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by the Token Exchange request test script."
+    },
+    {
+      "key": "gh_refresh_token",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by the Token Exchange request test script."
+    }
+  ],
+  "item": [
+    {
+      "name": "Flutter Flow",
+      "description": "Endpoints called by the Flutter app. Run in this order: Start → (Google OAuth) → Poll Status → Complete → (later) Unlink.",
+      "item": [
+        {
+          "name": "Step 1 — Start Deep-Link Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const res = pm.response.json();",
+                  "pm.test('Response has state', () => pm.expect(res).to.have.property('state'));",
+                  "pm.test('Response has agentId', () => pm.expect(res).to.have.property('agentId'));",
+                  "pm.test('Response has homeAppDeepLink', () => pm.expect(res).to.have.property('homeAppDeepLink'));",
+                  "pm.test('homeAppDeepLink points to home.google.com', () => {",
+                  "  pm.expect(res.homeAppDeepLink).to.include('home.google.com');",
+                  "});",
+                  "pm.test('state is UUID4 format', () => {",
+                  "  pm.expect(res.state).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);",
+                  "});",
+                  "",
+                  "if (res.state) {",
+                  "  pm.collectionVariables.set('gh_state', res.state);",
+                  "  console.log('Saved gh_state:', res.state);",
+                  "  console.log('homeAppDeepLink:', res.homeAppDeepLink);",
+                  "  if (res.webFallbackUrl) console.log('webFallbackUrl:', res.webFallbackUrl);",
+                  "  console.log('');",
+                  "  console.log('NEXT: Open homeAppDeepLink on a real device, or run the App Flip request manually.');",
+                  "  console.log('Then poll Step 2 (Status) until linked=true, then run Step 3 (Complete).');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/start",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking", "deep-link", "start"]
+            },
+            "description": "Creates a `PENDING` session in `google_home_link_sessions` DynamoDB (TTL 1800s).\n\nReturns:\n- `state` — CSRF token, saved to `gh_state` variable\n- `agentId` — Google Home agent ID (`digilux-ai-pro`)\n- `homeAppDeepLink` — URL to open the Google Home app at the account linking screen\n- `webFallbackUrl` — OAuth web URL if GH app is not installed\n\n**No request body required.**"
+          },
+          "response": [
+            {
+              "name": "200 OK — Session Created",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"state\": \"ec58cec7-1234-4abc-8def-0123456789ab\",\n    \"agentId\": \"digilux-ai-pro\",\n    \"homeAppDeepLink\": \"https://home.google.com/home-app/?deeplink=setup%2Fha_linking%3Fagent_id%3Ddigilux-ai-pro\",\n    \"webFallbackUrl\": \"https://iot.digilux.co.in/smarthome/google-home/oauth/authorize?pre_auth_state=ec58cec7-...&response_type=code&client_id=75gmuum6...&redirect_uri=https%3A%2F%2Foauth-redirect.googleusercontent.com%2Fr%2Fdigilux-ai-pro&scope=profile\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/start"}
+              }
+            },
+            {
+              "name": "401 Unauthorized",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Unauthorized\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/start"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step 2 — Poll Link Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const res = pm.response.json();",
+                  "pm.test('Response has linked field', () => pm.expect(res).to.have.property('linked'));",
+                  "pm.test('linked is a boolean', () => pm.expect(res.linked).to.be.a('boolean'));",
+                  "",
+                  "if (res.linked) {",
+                  "  pm.test('linkedAt is present when linked', () => pm.expect(res).to.have.property('linkedAt'));",
+                  "  console.log('Account is LINKED. linkedAt:', res.linkedAt);",
+                  "  console.log('Run Step 3 — Complete to finalise the Flutter session.');",
+                  "} else {",
+                  "  console.log('Not linked yet. Keep polling or complete the OAuth flow in Google Home.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking"]
+            },
+            "description": "Reads `google_home_tokens` DynamoDB for the current user.\n\n**No request body required.**\n\nFlutter polls this every 2 seconds for up to 10 minutes after opening the GH deep link.\nReturns `linked: true` as soon as Google has completed the token exchange (i.e. `google_home_oauth_token` has run and stored the tokens)."
+          },
+          "response": [
+            {
+              "name": "200 OK — Not Linked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": false\n}",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking"}
+              }
+            },
+            {
+              "name": "200 OK — Linked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": true,\n    \"linkedAt\": 1789991528\n}",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step 3 — Complete Deep-Link Session",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const state = pm.collectionVariables.get('gh_state');",
+                  "if (!state) {",
+                  "  console.warn('gh_state is empty — run Step 1 first.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('linked is true', () => pm.expect(res.linked).to.be.true);",
+                  "  console.log('Session complete. Google Home is linked.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"state\": \"{{gh_state}}\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/complete",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking", "deep-link", "complete"]
+            },
+            "description": "Updates the session in `google_home_link_sessions` from `PENDING` to `LINKED`.\nCalled by Flutter after the user returns from the Google Home OAuth flow.\n\nVerifies the session state belongs to the authenticated user and hasn't expired.\nReturns `{ \"linked\": true }` on success."
+          },
+          "response": [
+            {
+              "name": "200 OK — Complete",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": true\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"state\":\"ec58cec7-...\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/complete"}
+              }
+            },
+            {
+              "name": "400 — Session Expired or Not Found",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Session not found or expired\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "body": {"mode": "raw", "raw": "{\"state\":\"00000000-dead-beef-dead-000000000000\"}"},
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/complete"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unlink Google Home",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('linked is false', () => pm.expect(res.linked).to.be.false);",
+                  "  console.log('Google Home unlinked successfully.');",
+                  "  console.log('Note: GH app reflects this immediately only if GOOGLE_SA_KEY_SECRET_ARN is configured.');",
+                  "  console.log('Otherwise GH app updates within ~1 hour when the access token expires.');",
+                  "  pm.collectionVariables.set('gh_state', '');",
+                  "  pm.collectionVariables.set('gh_access_token', '');",
+                  "  pm.collectionVariables.set('gh_refresh_token', '');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking"]
+            },
+            "description": "Unlinks the authenticated user's Google Home account.\n\n**No request body required.**\n\n**What the backend does (in order):**\n1. Looks up the user's token record in `google_home_tokens` DynamoDB\n2. **Best-effort:** calls Google Home Graph API `deleteAgentUser` (requires `GOOGLE_SA_KEY_SECRET_ARN`) — makes GH app reflect the unlinked state immediately\n3. Deletes the token record from `google_home_tokens` DynamoDB\n4. Returns `{ \"linked\": false }`\n\n**Idempotent** — returns 200 even if user was already unlinked.\n\n**If `GOOGLE_SA_KEY_SECRET_ARN` is not set:** GH app still shows linked for up to ~1 hour until the access token we issued to Google expires and Google attempts a refresh (which will fail with `invalid_grant`, causing GH to mark the account as disconnected)."
+          },
+          "response": [
+            {
+              "name": "200 OK — Unlinked",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": false\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking"}
+              }
+            },
+            {
+              "name": "200 OK — Already Unlinked (idempotent)",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"linked\": false\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [{"key": "Authorization", "value": "Bearer <token>"}],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking"}
+              }
+            },
+            {
+              "name": "401 Unauthorized",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Unauthorized\"\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {"raw": "{{base_url}}/api/v1/voice/google-home/account-linking"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OAuth Endpoints (Google-facing)",
+      "description": "Called automatically by the Google Home app and Google's servers. Use these for manual QA and debugging — not part of the normal Flutter flow.",
+      "item": [
+        {
+          "name": "Authorize — App Flip (POST, Bearer token)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('Response has code', () => pm.expect(res).to.have.property('code'));",
+                  "  if (res.code) {",
+                  "    pm.collectionVariables.set('gh_auth_code', res.code);",
+                  "    console.log('Auth code issued and saved to gh_auth_code:', res.code.substring(0, 8) + '...');",
+                  "    console.log('Run Token Exchange — Authorization Code to get access + refresh tokens.');",
+                  "  }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cognito_token}}",
+                "description": "Cognito access token — simulates the App Flip path where GoogleHomeAppFlipActivity passes the user's token"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"client_id\": \"{{gh_client_id}}\",\n    \"redirect_uri\": \"https://oauth-redirect.googleusercontent.com/r/digilux-ai-pro\",\n    \"state\": \"\",\n    \"scope\": \"profile\",\n    \"response_type\": \"code\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/oauth/authorize",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "oauth", "authorize"]
+            },
+            "description": "App Flip path — simulates `GoogleHomeAppFlipActivity` sending the user's Cognito access token.\n\nThe lambda detects the `Authorization: Bearer` header and skips the login form.\nIt validates the token via Cognito `GetUser`, issues an auth code into `google_home_auth_codes` DynamoDB (TTL 900s), and returns:\n```json\n{\"code\": \"<auth_code>\", \"state\": \"\"}\n```\n\nThe auth code is auto-saved to `gh_auth_code` for the Token Exchange request."
+          },
+          "response": [
+            {
+              "name": "200 OK — Auth Code Issued",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"code\": \"fCuRNruS8mPpqXvYxZ2aB3dE4fG5hI6j\",\n    \"state\": \"\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <cognito_token>"}],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"client_id\":\"75gmuum6...\",\"redirect_uri\":\"https://oauth-redirect...\",\"state\":\"\",\"scope\":\"profile\",\"response_type\":\"code\"}"
+                },
+                "url": {"raw": "{{base_url}}/google-home/oauth/authorize"}
+              }
+            },
+            {
+              "name": "401 — Invalid Cognito Token",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"invalid_request\",\n    \"error_description\": \"Invalid or expired Cognito token\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer bad_token"}],
+                "body": {"mode": "raw", "raw": "{\"client_id\":\"75gmuum6...\"}"},
+                "url": {"raw": "{{base_url}}/google-home/oauth/authorize"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Token Exchange — Authorization Code",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const code = pm.collectionVariables.get('gh_auth_code');",
+                  "if (!code) {",
+                  "  console.warn('gh_auth_code is empty. Run Authorize — App Flip first to get a code.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('Response has access_token', () => pm.expect(res).to.have.property('access_token'));",
+                  "  pm.test('Response has refresh_token', () => pm.expect(res).to.have.property('refresh_token'));",
+                  "  pm.test('token_type is Bearer', () => pm.expect(res.token_type).to.equal('Bearer'));",
+                  "  pm.test('expires_in is 3600', () => pm.expect(res.expires_in).to.equal(3600));",
+                  "  pm.collectionVariables.set('gh_access_token', res.access_token);",
+                  "  pm.collectionVariables.set('gh_refresh_token', res.refresh_token);",
+                  "  pm.collectionVariables.set('gh_auth_code', '');",
+                  "  console.log('Tokens saved. access_token prefix:', res.access_token.substring(0, 8) + '...');",
+                  "  console.log('Run Poll Status or Fulfillment SYNC to verify the account is linked.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {"key": "grant_type",    "value": "authorization_code", "description": "Fixed value"},
+                {"key": "code",          "value": "{{gh_auth_code}}", "description": "Auth code from the authorize endpoint (single-use, 900s TTL)"},
+                {"key": "client_id",     "value": "{{gh_client_id}}", "description": "Google OAuth client ID"},
+                {"key": "client_secret", "value": "{{gh_client_secret}}", "description": "Google OAuth client secret from Secrets Manager"},
+                {"key": "redirect_uri",  "value": "https://oauth-redirect.googleusercontent.com/r/digilux-ai-pro", "description": "Must match the redirect_uri used in the authorize step"}
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/oauth/token",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "oauth", "token"]
+            },
+            "description": "Called by Google's servers to exchange the auth code for tokens. Simulated here for QA.\n\n**What the backend does:**\n1. Validates `client_id` + `client_secret` against Secrets Manager\n2. Looks up and deletes the auth code from `google_home_auth_codes` (single-use)\n3. Issues opaque `access_token` + `refresh_token` (random strings, NOT Google tokens)\n4. Stores both in `google_home_tokens` DynamoDB (this is the event that makes `linked=true`)\n\nThe `access_token` and `refresh_token` are saved to collection variables for use in fulfillment requests."
+          },
+          "response": [
+            {
+              "name": "200 OK — Tokens Issued",
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {"key": "Content-Type", "value": "application/json"},
+                {"key": "Cache-Control", "value": "no-store"}
+              ],
+              "body": "{\n    \"access_token\": \"Xk9mP2rT5vB8wN1qL4yD7uE0sF3aC6hJ\",\n    \"token_type\": \"Bearer\",\n    \"expires_in\": 3600,\n    \"refresh_token\": \"Yz7nQ4kR2mS9vW6pU0tI3oA5bC1dE8fG\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    {"key": "grant_type", "value": "authorization_code"},
+                    {"key": "code", "value": "fCuRNruS..."},
+                    {"key": "client_id", "value": "75gmuum6..."},
+                    {"key": "client_secret", "value": "g41e4h2i..."}
+                  ]
+                },
+                "url": {"raw": "{{base_url}}/google-home/oauth/token"}
+              }
+            },
+            {
+              "name": "400 — Invalid / Expired Code",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"invalid_grant\",\n    \"error_description\": \"Authorization code not found or expired\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "body": {"mode": "urlencoded", "urlencoded": [{"key": "grant_type", "value": "authorization_code"}, {"key": "code", "value": "expired_code"}]},
+                "url": {"raw": "{{base_url}}/google-home/oauth/token"}
+              }
+            },
+            {
+              "name": "401 — Invalid Client Credentials",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"invalid_client\",\n    \"error_description\": \"Invalid client credentials\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "body": {"mode": "urlencoded", "urlencoded": [{"key": "client_id", "value": "wrong"}, {"key": "client_secret", "value": "wrong"}]},
+                "url": {"raw": "{{base_url}}/google-home/oauth/token"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Token Refresh",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const rt = pm.collectionVariables.get('gh_refresh_token');",
+                  "if (!rt) {",
+                  "  console.warn('gh_refresh_token is empty. Run Token Exchange first.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('New access_token present', () => pm.expect(res).to.have.property('access_token'));",
+                  "  pm.collectionVariables.set('gh_access_token', res.access_token);",
+                  "  console.log('Access token refreshed. New prefix:', res.access_token.substring(0, 8) + '...');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/x-www-form-urlencoded"}
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {"key": "grant_type",     "value": "refresh_token", "description": "Fixed value"},
+                {"key": "refresh_token",  "value": "{{gh_refresh_token}}", "description": "Refresh token from the initial token exchange"},
+                {"key": "client_id",      "value": "{{gh_client_id}}"},
+                {"key": "client_secret",  "value": "{{gh_client_secret}}"}
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/oauth/token",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "oauth", "token"]
+            },
+            "description": "Issues a new access token without requiring re-authentication.\n\nThe refresh token stays the same. Only the access token and its expiry are updated in DynamoDB.\n\nIf the refresh token is not found (e.g. user already unlinked), returns `invalid_grant`."
+          },
+          "response": [
+            {
+              "name": "200 OK — New Access Token",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"access_token\": \"NEW_Xk9mP2rT5vB8wN1qL4yD7uE0sF3aC6hJ\",\n    \"token_type\": \"Bearer\",\n    \"expires_in\": 3600,\n    \"refresh_token\": \"Yz7nQ4kR2mS9vW6pU0tI3oA5bC1dE8fG\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "body": {"mode": "urlencoded", "urlencoded": [{"key": "grant_type", "value": "refresh_token"}, {"key": "refresh_token", "value": "Yz7n..."}]},
+                "url": {"raw": "{{base_url}}/google-home/oauth/token"}
+              }
+            },
+            {
+              "name": "400 — Refresh Token Not Found (account unlinked)",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"invalid_grant\",\n    \"error_description\": \"Refresh token not found or revoked\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "body": {"mode": "urlencoded", "urlencoded": [{"key": "grant_type", "value": "refresh_token"}, {"key": "refresh_token", "value": "revoked_token"}]},
+                "url": {"raw": "{{base_url}}/google-home/oauth/token"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fulfillment (Google-facing)",
+      "description": "Called by Google's servers for voice commands. Use `gh_access_token` (opaque token we issued) as the Bearer token — NOT a Cognito token.",
+      "item": [
+        {
+          "name": "Fulfillment — SYNC",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('payload.devices is an array', () => pm.expect(res.payload.devices).to.be.an('array'));",
+                  "  console.log('SYNC returned', res.payload.devices.length, 'device(s).');",
+                  "  if (res.payload.devices.length > 0) {",
+                  "    console.log('First device:', JSON.stringify(res.payload.devices[0], null, 2));",
+                  "  }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{gh_access_token}}",
+                "description": "Opaque access token issued by our token endpoint — NOT a Cognito token"
+              },
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"inputs\": [\n        {\n            \"intent\": \"action.devices.SYNC\"\n        }\n    ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/fulfillment",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "fulfillment"]
+            },
+            "description": "Triggered by Google when the user says \"Hey Google, sync my devices\" or after account linking.\n\nThe lambda resolves the `gh_access_token` to a `userId` via the `accessToken-index` GSI, then reads `digilux_user_device_mapping` DynamoDB to return the user's sites as Google Home scene devices."
+          },
+          "response": [
+            {
+              "name": "200 OK — Devices Returned",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"payload\": {\n        \"agentUserId\": \"user-cognito-sub-abc123\",\n        \"devices\": [\n            {\n                \"id\": \"site:SITE_001\",\n                \"type\": \"action.devices.types.SCENE\",\n                \"traits\": [\"action.devices.traits.Scene\"],\n                \"name\": {\n                    \"defaultNames\": [\"My Home\"],\n                    \"name\": \"My Home\",\n                    \"nicknames\": [\"My Home\"]\n                },\n                \"willReportState\": false,\n                \"attributes\": {\"sceneReversible\": false},\n                \"deviceInfo\": {\"manufacturer\": \"Digilux\"},\n                \"customData\": {\"siteId\": \"SITE_001\"}\n            }\n        ]\n    }\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <access_token>"}],
+                "body": {"mode": "raw", "raw": "{\"requestId\":\"ff36...\",\"inputs\":[{\"intent\":\"action.devices.SYNC\"}]}"},
+                "url": {"raw": "{{base_url}}/google-home/fulfillment"}
+              }
+            },
+            {
+              "name": "401 — Invalid / Expired Access Token",
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"error\": \"Unauthorized\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer revoked_or_expired_token"}],
+                "body": {"mode": "raw", "raw": "{\"requestId\":\"ff36...\",\"inputs\":[{\"intent\":\"action.devices.SYNC\"}]}"},
+                "url": {"raw": "{{base_url}}/google-home/fulfillment"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fulfillment — QUERY",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('payload.devices is an object', () => pm.expect(res.payload.devices).to.be.an('object'));",
+                  "  console.log('QUERY response:', JSON.stringify(res.payload.devices, null, 2));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{gh_access_token}}",
+                "description": "Opaque access token issued by our token endpoint"
+              },
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"inputs\": [\n        {\n            \"intent\": \"action.devices.QUERY\",\n            \"payload\": {\n                \"devices\": [\n                    {\"id\": \"site:SITE_001\"}\n                ]\n            }\n        }\n    ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/fulfillment",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "fulfillment"]
+            },
+            "description": "Triggered when the user asks \"Hey Google, is [device] on?\".\n\n**NOTE:** Currently returns a placeholder `{ \"online\": true }` for all devices. Device state from the Digilux control API is not yet integrated."
+          },
+          "response": [
+            {
+              "name": "200 OK — Device State (placeholder)",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"payload\": {\n        \"devices\": {\n            \"site:SITE_001\": {\n                \"online\": true,\n                \"status\": \"SUCCESS\"\n            }\n        }\n    }\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <access_token>"}],
+                "body": {"mode": "raw", "raw": "{\"requestId\":\"ff36...\",\"inputs\":[{\"intent\":\"action.devices.QUERY\",\"payload\":{\"devices\":[{\"id\":\"site:SITE_001\"}]}}]}"},
+                "url": {"raw": "{{base_url}}/google-home/fulfillment"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fulfillment — EXECUTE (stub)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "console.log('NOTE: EXECUTE is a stub — it returns SUCCESS but does NOT control the device.');",
+                  "console.log('TODO: implement Digilux device control API call in google_home_fulfillment Lambda.');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{gh_access_token}}",
+                "description": "Opaque access token issued by our token endpoint"
+              },
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"inputs\": [\n        {\n            \"intent\": \"action.devices.EXECUTE\",\n            \"payload\": {\n                \"commands\": [\n                    {\n                        \"devices\": [{\"id\": \"site:SITE_001\"}],\n                        \"execution\": [\n                            {\n                                \"command\": \"action.devices.commands.ActivateScene\",\n                                \"params\": {\"deactivate\": false}\n                            }\n                        ]\n                    }\n                ]\n            }\n        }\n    ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/fulfillment",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "fulfillment"]
+            },
+            "description": "Triggered when the user says \"Hey Google, activate [scene]\" or issues a control command.\n\n**THIS IS A STUB.** The lambda returns `{ \"status\": \"SUCCESS\" }` but does NOT call the Digilux device control API. Physical device control is not yet implemented.\n\nSee `lambdas/google_home_fulfillment/lambda_function.py` — `_handle_execute()` — `# TODO: send command to Digilux device control API`."
+          },
+          "response": [
+            {
+              "name": "200 OK — STUB Success (device NOT actually controlled)",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"payload\": {\n        \"commands\": [\n            {\n                \"ids\": [\"site:SITE_001\"],\n                \"status\": \"SUCCESS\",\n                \"states\": {\"online\": true}\n            }\n        ]\n    }\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <access_token>"}],
+                "body": {"mode": "raw", "raw": "{\"requestId\":\"ff36...\",\"inputs\":[{\"intent\":\"action.devices.EXECUTE\",\"payload\":{\"commands\":[{\"devices\":[{\"id\":\"site:SITE_001\"}],\"execution\":[{\"command\":\"action.devices.commands.ActivateScene\"}]}]}}]}"},
+                "url": {"raw": "{{base_url}}/google-home/fulfillment"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fulfillment — DISCONNECT",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('DISCONNECT handled. Token record deleted from google_home_tokens.');",
+                  "  pm.collectionVariables.set('gh_access_token', '');",
+                  "  pm.collectionVariables.set('gh_refresh_token', '');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{gh_access_token}}",
+                "description": "Opaque access token issued by our token endpoint"
+              },
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"inputs\": [\n        {\n            \"intent\": \"action.devices.DISCONNECT\"\n        }\n    ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/fulfillment",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "fulfillment"]
+            },
+            "description": "Sent by Google when the user unlinks from within the Google Home app.\n\nThe lambda deletes the user's token record from `google_home_tokens` DynamoDB and returns an empty payload. Google expects HTTP 200 with `{}` payload.\n\nThis is the Google-initiated unlink path. The Digilux-app-initiated unlink uses the `DELETE /api/v1/voice/google-home/account-linking` endpoint instead, which also calls the Home Graph `deleteAgentUser` API."
+          },
+          "response": [
+            {
+              "name": "200 OK — Disconnected",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n    \"requestId\": \"ff36a3cc-ec34-11e6-b1a0-64510650abcf\",\n    \"payload\": {}\n}",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{"key": "Authorization", "value": "Bearer <access_token>"}],
+                "body": {"mode": "raw", "raw": "{\"requestId\":\"ff36...\",\"inputs\":[{\"intent\":\"action.devices.DISCONNECT\"}]}"},
+                "url": {"raw": "{{base_url}}/google-home/fulfillment"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Error Scenarios",
+      "description": "Requests that demonstrate specific error responses for client-side testing.",
+      "item": [
+        {
+          "name": "Start — No Auth → 401",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking/deep-link/start",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking", "deep-link", "start"]
+            },
+            "description": "Omits Authorization header. Expect 401."
+          },
+          "response": []
+        },
+        {
+          "name": "Status — No Auth → 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking"]
+            },
+            "description": "Omits Authorization header. Expect 401."
+          },
+          "response": []
+        },
+        {
+          "name": "Unlink — No Auth → 401",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/voice/google-home/account-linking",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "voice", "google-home", "account-linking"]
+            },
+            "description": "Omits Authorization header. Expect 401."
+          },
+          "response": []
+        },
+        {
+          "name": "Token Exchange — Invalid Client Secret → 401",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/x-www-form-urlencoded"}],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {"key": "grant_type",    "value": "authorization_code"},
+                {"key": "code",          "value": "any_code"},
+                {"key": "client_id",     "value": "{{gh_client_id}}"},
+                {"key": "client_secret", "value": "wrong_secret"}
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/oauth/token",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "oauth", "token"]
+            },
+            "description": "Passes wrong client_secret. Expect 401 invalid_client."
+          },
+          "response": []
+        },
+        {
+          "name": "Fulfillment — Expired Access Token → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer expired_or_revoked_token"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"requestId\":\"test-123\",\"inputs\":[{\"intent\":\"action.devices.SYNC\"}]}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/google-home/fulfillment",
+              "host": ["{{base_url}}"],
+              "path": ["google-home", "fulfillment"]
+            },
+            "description": "Uses a token that no longer exists in google_home_tokens. Expect 401. This is what Google will see after a user unlinks — Google will then initiate a token refresh, which will also fail (invalid_grant), causing GH to mark the account as disconnected."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

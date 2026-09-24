@@ -109,10 +109,11 @@ User submits the login form.
 | Read + delete | `google_home_auth_codes` | Validates and consumes the auth code |
 | Write | `google_home_tokens` | Stores `userId`, `accessToken`, `refreshToken`, `expiresAt`, `agentId` |
 
-### Current status
-**Blocked by Google's project-level backoff** since Sept 18 12:43 UTC. Google triggered
-this backoff after repeated `invalid_client` errors (client_secret mismatch). Google stops
-calling this endpoint for 24–96h. No invocations have been observed since the backoff started.
+### Important — token types are opaque
+The `access_token` and `refresh_token` stored in `google_home_tokens` are **random opaque strings
+we generated** — they are not Google OAuth tokens. When Google calls `oauth2.googleapis.com/revoke`
+it expects tokens Google itself issued; calling it with our opaque tokens does nothing. The tokens
+Google holds are credentials to call our fulfillment endpoint, not Google API credentials.
 
 ---
 
@@ -173,10 +174,30 @@ Voice commands will not physically control devices until this is implemented.
 **Waits for Google?** No
 
 ### What it does
-1. Looks up the user's `refreshToken` from `google_home_tokens` DynamoDB
-2. Calls `https://oauth2.googleapis.com/revoke` with the refresh token to revoke on Google's side
-3. Deletes the user's record from `google_home_tokens` DynamoDB
-4. Returns `{"unlinked": true}`
+1. Authenticates the Flutter user via the API Gateway Cognito authorizer
+2. Fetches the user's token record from `google_home_tokens` DynamoDB (returns 200 if already unlinked — idempotent)
+3. **Best-effort:** calls the [Google Home Graph API `deleteAgentUser`](https://developers.home.google.com/cloud-to-cloud/api/reference/rest/v1/agentUsers/delete) endpoint so the GH app immediately reflects the unlinked state
+4. Deletes the user's record from `google_home_tokens` DynamoDB
+5. Returns `{"linked": false}`
+
+### Why the Home Graph API call is needed
+Without step 3, Google's servers retain the link until our issued access token expires (~1 hour).
+The GH app will still show "Digilux" as linked for up to one hour after the Digilux app unlinks.
+`deleteAgentUser` tells Google to remove the link immediately, which also triggers a `DISCONNECT`
+intent to our fulfillment Lambda (which is already handled).
+
+### Home Graph API setup (one-time prerequisite)
+Requires `GOOGLE_SA_KEY_SECRET_ARN` env var pointing to a Secrets Manager secret containing a
+Google service account JSON key (must have `homegraph.agentUsers.delete` permission).
+
+When `GOOGLE_SA_KEY_SECRET_ARN` is empty the lambda still unlinks on our side — GH will sync
+within ~1 hour when token expiry triggers a refresh attempt that fails with `invalid_grant`.
+
+### DynamoDB reads/writes
+| Operation | Table | Detail |
+|---|---|---|
+| Read | `google_home_tokens` | Fetch record to check if linked |
+| Delete | `google_home_tokens` | Remove user's token record on unlink |
 
 ---
 
@@ -192,7 +213,7 @@ Voice commands will not physically control devices until this is implemented.
 | `google_home_complete` | Flutter app (after user returns from browser) | `POST /api/v1/voice/google-home/account-linking/deep-link/complete`<br>Header: `Authorization: Bearer <cognito_access_token>`<br>Body: `{"state":"ec58cec7-..."}` | `{"linked":true}` | Updates the session in `google_home_link_sessions` from `PENDING` to `LINKED` once Flutter detects the user has returned from the OAuth browser flow. | No |
 | `google_home_status` | Flutter app (polls every 2s, up to 10 min) | `GET /api/v1/voice/google-home/account-linking`<br>Header: `Authorization: Bearer <cognito_access_token>` | Linked: `{"linked":true,"linkedAt":"1789991528"}`<br>Not linked: `{"linked":false}` | Reads `google_home_tokens` DynamoDB for the current user. Returns `linked: true` as soon as Google has completed the token exchange. This is how Flutter knows to update the UI to "Google Home linked". | No |
 | `google_home_fulfillment` | **Google's servers** (voice commands) | `POST /google-home/fulfillment`<br>Body (JSON): `{"requestId":"ff36...","inputs":[{"intent":"action.devices.SYNC"}],"user":{"userId":"f123dd2a..."}}` | SYNC: `{"requestId":"ff36...","payload":{"agentUserId":"f123dd2a...","devices":[{"id":"device-1","type":"action.devices.types.LIGHT",...}]}}` | Handles all Google Smart Home intents: **SYNC** (return device list), **QUERY** (return device state), **EXECUTE** (control device — stub, not yet implemented), **DISCONNECT** (user unlinked from GH side). | **Yes — always listening for voice commands** |
-| `google_home_unlink` | Flutter app (user taps "Unlink") | `DELETE /api/v1/voice/google-home/account-linking`<br>Header: `Authorization: Bearer <cognito_access_token>` | `{"unlinked":true}` | Revokes the refresh token with Google (`oauth2.googleapis.com/revoke`) and deletes the user's record from `google_home_tokens` DynamoDB. Idempotent — returns success even if user was already unlinked. | No |
+| `google_home_unlink` | Flutter app (user taps "Unlink") | `DELETE /api/v1/voice/google-home/account-linking`<br>Header: `Authorization: Bearer <cognito_access_token>` | `{"linked":false}` | Calls Google Home Graph API `deleteAgentUser` (best-effort, requires `GOOGLE_SA_KEY_SECRET_ARN`) so GH app immediately shows unlinked, then deletes the record from `google_home_tokens` DynamoDB. Idempotent — returns 200 even if already unlinked. Without the SA key, GH syncs within ~1h on token expiry. | No |
 
 ---
 
@@ -210,5 +231,5 @@ Voice commands will not physically control devices until this is implemented.
 
 | Item | Lambda | Detail |
 |---|---|---|
-| Google backoff active | `google_home_oauth_token` | No invocations since Sept 18 12:43 UTC. Backoff clears automatically — retry after 24–96h |
-| EXECUTE not implemented | `google_home_fulfillment` | `# TODO: send command to Digilux device control API` — voice commands do not control devices |
+| EXECUTE not implemented | `google_home_fulfillment` | `# TODO: send command to Digilux device control API` — voice commands do not control devices yet |
+| Home Graph unlink not configured | `google_home_unlink` | `GOOGLE_SA_KEY_SECRET_ARN` is empty in QA env — GH app shows linked for up to 1h after unlink. Fix: create service account with `homegraph.agentUsers.delete`, store JSON key in Secrets Manager, set the env var, redeploy |
