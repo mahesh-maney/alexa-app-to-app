@@ -14,7 +14,7 @@ Indian customers to use Alexa voice commands with Digilux devices, Amazon mandat
 Smart Home skill Lambda function must be deployed in **AWS eu-west-1 (Ireland)**. This is an
 Amazon infrastructure requirement — not a Digilux architectural choice.
 
-The `alexa` Smart Home fulfillment Lambda is already deployed in eu-west-1 as of August 2026.
+The `alexa` Smart Home fulfillment Lambda shall be deployed in eu-west-1.
 This document assesses the security posture of that deployment for management, technology, and
 cybersecurity review.
 
