@@ -45,66 +45,214 @@ deployment region for Indian Alexa customers.
 
 ---
 
-## 3. Which Lambdas Go Where
+## 3. Which Lambdas Go Where (Honeywell AWS Account)
 
-This is the most important architectural clarification:
+This is the most important architectural clarification. In Honeywell's AWS account, all
+infrastructure is deployed in **us-east-1 (Virginia)** — except for one Lambda which Amazon
+forces to eu-west-1.
 
-| Lambda | Region | Invoked By | Must Be in eu-west-1? |
-|--------|--------|-----------|----------------------|
-| `alexa` (Smart Home fulfillment) | **eu-west-1** | Amazon Alexa Cloud | **Yes — Amazon requirement** |
-| `alexa_start_app_to_app` | us-east-1 | Flutter app (via API Gateway) | No |
-| `alexa_complete_app_to_app` | us-east-1 | Flutter app (via API Gateway) | No |
-| `alexa_link_status` | us-east-1 | Flutter app (via API Gateway) | No |
-| `alexa_unlink` | us-east-1 | Flutter app (via API Gateway) | No |
-| `alexa_callback` | us-east-1 | Browser redirect (via API Gateway) | No |
-| `alexa_skill_events` | us-east-1 | Amazon Alexa skill events | No |
+| Lambda | AWS Region | Invoked By | Must Be in eu-west-1? |
+|--------|-----------|-----------|----------------------|
+| `alexa` (Smart Home fulfillment) | **eu-west-1 — Ireland** | Amazon Alexa Cloud | **Yes — Amazon mandatory** |
+| `alexa_start_app_to_app` | us-east-1 — Virginia | Flutter app via API Gateway | No |
+| `alexa_complete_app_to_app` | us-east-1 — Virginia | Flutter app via API Gateway | No |
+| `alexa_link_status` | us-east-1 — Virginia | Flutter app via API Gateway | No |
+| `alexa_unlink` | us-east-1 — Virginia | Flutter app via API Gateway | No |
+| `alexa_callback` | us-east-1 — Virginia | Browser OAuth redirect via API Gateway | No |
+| `alexa_skill_events` | us-east-1 — Virginia | Amazon Alexa skill lifecycle events | No |
 
-Only the `alexa` Smart Home fulfillment Lambda (handles SYNC/QUERY/EXECUTE/DISCONNECT directives)
-must be in eu-west-1. The App-to-App account linking Lambdas are called by the Digilux Flutter
-app through API Gateway in us-east-1 — they are correctly placed in US.
-
-**Current status**: The `alexa` Lambda is already deployed in eu-west-1 (last updated
-2026-08-22). This requirement is already met.
-
----
-
-## 4. Architecture Overview
-
-```
-Customer speaks to Alexa (India)
-         │
-         │  Amazon routes to eu-west-1 (mandatory for IN marketplace)
-         ▼
-Amazon Alexa Cloud (routes to eu-west-1)
-         │
-         │  HTTPS POST — signed directive (SYNC / QUERY / EXECUTE)
-         ▼
-  alexa Lambda (eu-west-1)  ←── stateless, no data stored here
-         │
-    ┌────┴────────────────────────┐
-    ▼                             ▼
-Secrets Manager              DynamoDB / IoT Core
-(eu-west-1)                  (us-east-1 — US)
-[LWA tokens, AES key]        [user tokens, device state]
-                                    │
-                                    ▼
-                            Physical Device
-                          (MQTT via IoT Core)
-
-
-Flutter App (Account Linking — separate flow)
-         │
-         │  HTTPS via API Gateway (us-east-1)
-         ▼
-App-to-App Lambdas (us-east-1) — alexa_start, alexa_complete, etc.
-```
-
-**Key principle**: The eu-west-1 Lambda is **stateless**. It reads data from us-east-1 and
-publishes commands to IoT Core in us-east-1. No customer data is written to or stored in Ireland.
+All supporting AWS infrastructure (API Gateway, Cognito, DynamoDB, IoT Core, Secrets Manager)
+stays in us-east-1. Only the Smart Home fulfillment Lambda crosses to eu-west-1 — and it
+connects back to us-east-1 for all data reads and device commands.
 
 ---
 
-## 5. Data Residency
+## 4. Honeywell Deployment — Entity Region Map
+
+Every entity in the architecture, its AWS region, and what data it holds:
+
+| Entity | Type | AWS Region | Data / Purpose |
+|--------|------|-----------|----------------|
+| Customer (India) | End user | India (physical) | Speaks voice command to Echo / Alexa app |
+| Echo Device / Alexa App | Amazon hardware/app | India (physical) | Captures voice, sends to Alexa Cloud |
+| Amazon Alexa Cloud | Amazon-managed | Amazon global (US) | Processes speech, identifies intent, routes to skill |
+| API Gateway | AWS | us-east-1 | HTTPS entry point for Flutter app account linking calls |
+| `alexa` Lambda | AWS Lambda | **eu-west-1** | Smart Home fulfillment — SYNC / QUERY / EXECUTE |
+| `alexa_start_app_to_app` | AWS Lambda | us-east-1 | Initiates account linking session |
+| `alexa_complete_app_to_app` | AWS Lambda | us-east-1 | Exchanges auth code for LWA tokens |
+| `alexa_callback` | AWS Lambda | us-east-1 | Receives OAuth redirect from Amazon login |
+| `alexa_link_status` | AWS Lambda | us-east-1 | Returns current link status to Flutter app |
+| `alexa_unlink` | AWS Lambda | us-east-1 | Revokes LWA tokens, removes link |
+| `alexa_skill_events` | AWS Lambda | us-east-1 | Handles skill enable/disable lifecycle events |
+| Cognito User Pool | AWS | us-east-1 | Authenticates Honeywell app users |
+| DynamoDB — sessions table | AWS | us-east-1 | Temporary account linking sessions (TTL: 10 min) |
+| DynamoDB — tokens table | AWS | us-east-1 | Alexa LWA access + refresh tokens per user |
+| DynamoDB — device mapping | AWS | us-east-1 | Maps user ID to device DUIDs |
+| DynamoDB — device state | AWS | us-east-1 | Live device state (on/off, brightness, etc.) |
+| Secrets Manager — LWA | AWS | **eu-west-1** | Amazon LWA client credentials (co-located with fulfillment Lambda) |
+| Secrets Manager — AES key | AWS | **eu-west-1** | AES-GCM key for endpoint ID encryption |
+| Secrets Manager — other | AWS | us-east-1 | Device table encryption secret |
+| IoT Core | AWS | us-east-1 | MQTT broker — delivers commands to physical devices |
+| Physical Device | Hardware | Customer premises (India) | Subscribed to MQTT topic; executes command |
+
+---
+
+## 5. End-to-End Data Flow
+
+There are two distinct flows: **Account Linking** (one-time setup) and **Voice Command** (every
+time the customer speaks to Alexa).
+
+---
+
+### 5.1 Flow A — Account Linking (One-Time Setup)
+
+The customer links their Honeywell account to Alexa once through the Flutter app.
+
+```
+[INDIA — Customer Device]
+Customer opens Honeywell Flutter app → taps "Link Alexa Account"
+         │
+         │  HTTPS POST  (TLS 1.3)
+         ▼
+[us-east-1 — API Gateway]
+  └─► Routes to alexa_start_app_to_app Lambda
+         │  Generates KMS-encrypted session token
+         ▼
+[us-east-1 — DynamoDB: alexa_app_linking_sessions]
+  └─► Stores session (TTL 10 min)
+  └─► Returns deep link URL to Flutter app
+         │
+         ▼
+[INDIA — Customer Device]
+  └─► App opens Amazon login page in browser
+         │  Customer logs in with Amazon account
+         ▼
+[AMAZON — Login with Amazon (LWA)]
+  └─► Customer approves Alexa skill
+         │  302 Redirect with auth code → callback URL
+         ▼
+[us-east-1 — API Gateway → alexa_callback Lambda]
+  └─► Receives auth code from Amazon
+  └─► Returns HTML page with JS redirect to app deep link
+         │
+         ▼
+[INDIA — Flutter App]
+  └─► App receives auth code via deep link
+         │  HTTPS POST  (TLS 1.3)
+         ▼
+[us-east-1 — API Gateway → alexa_complete_app_to_app Lambda]
+  └─► Reads session from DynamoDB (us-east-1)
+  └─► Reads LWA secret from Secrets Manager (eu-west-1)  ← cross-region
+         │  HTTPS POST to Amazon LWA token endpoint
+         ▼
+[AMAZON — LWA Token API]
+  └─► Returns LWA access token + refresh token
+         │  Tokens encrypted with KMS key (us-east-1)
+         ▼
+[us-east-1 — DynamoDB: alexa_lwa_tokens]
+  └─► Stores encrypted tokens against user ID
+  └─► Returns success to Flutter app
+         │
+         ▼
+[INDIA — Customer]
+  └─► Account linked. Alexa can now control devices.
+```
+
+---
+
+### 5.2 Flow B — Voice Command (Every Alexa Request)
+
+After account linking, every voice command follows this path:
+
+```
+[INDIA — Customer]
+  └─► "Alexa, turn on the living room light"
+         │  Audio stream over internet
+         ▼
+[AMAZON — Alexa Voice Service]
+  └─► Speech recognition + intent parsing
+  └─► Intent: Alexa.PowerController / TurnOn
+  └─► Identifies: Honeywell Smart Home skill
+  └─► Customer marketplace: India (IN)
+         │
+         │  Amazon routes to eu-west-1 — MANDATORY for IN marketplace
+         │  HTTPS POST signed directive  (TLS 1.3)
+         ▼
+[eu-west-1 — alexa Lambda]  ← THE ONLY ENTITY IN IRELAND
+  └─► Validates Amazon request signature
+  └─► Retrieves AES-GCM key from Secrets Manager (eu-west-1) — same region
+  └─► Decrypts endpointId → gets device DUID
+         │  Cross-region call over AWS backbone  (TLS)
+         ▼
+[us-east-1 — DynamoDB: alexa_lwa_tokens]
+  └─► Looks up user by access token → returns user ID + DUID
+         │  Cross-region call over AWS backbone  (TLS)
+         ▼
+[us-east-1 — IoT Core]
+  └─► Publishes MQTT message:
+      Topic:   iot/device/{duid}/request
+      Payload: { "action": "turn_on", "device": "light" }
+         │  MQTT over TLS 1.2  (persistent connection)
+         ▼
+[INDIA — Physical Device]
+  └─► Receives command → executes → turns on light
+  └─► Publishes state update to iot/device/{duid}/response
+         │
+         ▼
+[eu-west-1 — alexa Lambda]
+  └─► Reads device response
+  └─► Returns Alexa success directive to Amazon
+         │
+         ▼
+[AMAZON — Alexa Cloud]
+  └─► Speaks: "OK"
+         │
+         ▼
+[INDIA — Customer]
+  └─► Light turns on.
+```
+
+---
+
+### 5.3 Cross-Region Data Flow Summary
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    HONEYWELL AWS ACCOUNT                         │
+│                                                                  │
+│  ┌──────────────────────────┐    ┌───────────────────────────┐  │
+│  │      eu-west-1           │    │       us-east-1           │  │
+│  │      (Ireland)           │    │       (Virginia)          │  │
+│  │                          │    │                           │  │
+│  │  alexa Lambda  ──────────┼────┼──► DynamoDB (lwa_tokens)  │  │
+│  │  (fulfillment) ◄─────────┼────┼─── DynamoDB (device_map)  │  │
+│  │       │          AWS     │    │  ► IoT Core (MQTT pub)    │  │
+│  │       │        backbone  │    │                           │  │
+│  │  Secrets Mgr             │    │  API Gateway              │  │
+│  │  (LWA creds)             │    │  alexa_start Lambda       │  │
+│  │  (AES key)               │    │  alexa_complete Lambda    │  │
+│  │                          │    │  alexa_callback Lambda    │  │
+│  └──────────────────────────┘    │  alexa_status Lambda      │  │
+│          ▲                       │  alexa_unlink Lambda      │  │
+│          │  Amazon routes        │  alexa_skill_events       │  │
+│          │  IN marketplace       │  Cognito User Pool        │  │
+│          │  here (mandatory)     │  Secrets Mgr (device key) │  │
+│          │                       └───────────────────────────┘  │
+└──────────┼───────────────────────────────────────────────────────┘
+           │
+    Amazon Alexa Cloud ◄──── Indian customer (voice command)
+    Flutter App (account linking) ──────────────────────────────►
+                                           API Gateway (us-east-1)
+```
+
+**Key takeaway**: Only the `alexa` fulfillment Lambda and two Secrets Manager entries live in
+eu-west-1. Everything else — all customer data, all device data, all account linking logic —
+stays in us-east-1. The eu-west-1 Lambda is a stateless compute bridge that Amazon's routing
+infrastructure requires to be in Ireland.
+
+---
+
+## 6. Data Residency
 
 | Data Type | Where Stored | Jurisdiction |
 |-----------|-------------|--------------|
@@ -123,9 +271,9 @@ credentials (API keys), not customer personal data.
 
 ---
 
-## 6. Security Controls — Current State
+## 7. Security Controls — Current State
 
-### 6.1 Secrets Management — PASS
+### 7.1 Secrets Management — PASS
 
 All sensitive credentials use AWS Secrets Manager. No secrets are hardcoded in Lambda code
 or environment variables.
@@ -143,7 +291,7 @@ which means the eu-west-1 Lambda retrieves it with minimal cross-region latency.
 
 ---
 
-### 6.2 Encryption in Transit — PASS
+### 7.2 Encryption in Transit — PASS
 
 | Path | Protocol | Enforced By |
 |------|----------|------------|
@@ -158,7 +306,7 @@ which means the eu-west-1 Lambda retrieves it with minimal cross-region latency.
 
 ---
 
-### 6.3 Encryption at Rest — PARTIAL
+### 7.3 Encryption at Rest — PARTIAL
 
 | Resource | Encryption | Key Type | Status |
 |----------|-----------|----------|--------|
@@ -176,7 +324,7 @@ full key rotation control and audit trail of every decrypt operation.
 
 ---
 
-### 6.4 IAM / Access Control — NEEDS ATTENTION
+### 7.4 IAM / Access Control — NEEDS ATTENTION
 
 The `alexa` Lambda in eu-west-1 uses an auto-generated service role (`alexa-role-zt15wjgn`)
 rather than a purpose-built IAM role. This is a flag for a cybersecurity architect because:
@@ -202,7 +350,7 @@ least-privilege principles.
 
 ---
 
-### 6.5 Alexa Request Signature Validation
+### 7.5 Alexa Request Signature Validation
 
 Amazon signs every Smart Home skill directive sent to the Lambda. The Lambda must validate
 this signature to prevent spoofed requests (anyone calling your Lambda endpoint pretending
@@ -213,7 +361,7 @@ This is a mandatory security control that Alexa's own skill certification requir
 
 ---
 
-### 6.6 Audit Logging (CloudTrail) — PASS
+### 7.6 Audit Logging (CloudTrail) — PASS
 
 | Trail | Coverage | Status |
 |-------|---------|--------|
@@ -227,7 +375,7 @@ automatically by the multi-region `management-events` trail.
 
 ---
 
-### 6.7 Device Identity Protection — PASS
+### 7.7 Device Identity Protection — PASS
 
 The `endpointId` sent to Amazon's Alexa Cloud is AES-GCM encrypted. Amazon never sees the
 raw Device Unique Identifier (DUID). The encryption key is in Secrets Manager (eu-west-1)
@@ -237,7 +385,7 @@ and is never transmitted outside AWS.
 
 ---
 
-### 6.8 Network Isolation (VPC) — NOT CONFIGURED
+### 7.8 Network Isolation (VPC) — NOT CONFIGURED
 
 The `alexa` Lambda in eu-west-1 runs without a VPC. Lambda-to-DynamoDB and Lambda-to-IoT
 traffic travels over the AWS private backbone (not the public internet) but without
@@ -251,7 +399,7 @@ will continue over the AWS backbone (no VPC endpoint possible cross-region — t
 
 ---
 
-### 6.9 Can Anyone See Our Lambda Code?
+### 7.9 Can Anyone See Our Lambda Code?
 
 | Party | Access | Basis |
 |-------|--------|-------|
@@ -266,7 +414,7 @@ available via AWS Artifact on request.
 
 ---
 
-## 7. Compliance Posture
+## 8. Compliance Posture
 
 | Standard | AWS eu-west-1 Status | Relevance |
 |----------|---------------------|-----------|
@@ -278,7 +426,7 @@ available via AWS Artifact on request.
 
 ---
 
-## 8. Risk Summary
+## 9. Risk Summary
 
 | Risk | Likelihood | Impact | Mitigation | Status |
 |------|-----------|--------|-----------|--------|
@@ -292,7 +440,7 @@ available via AWS Artifact on request.
 
 ---
 
-## 9. Recommended Actions
+## 10. Recommended Actions
 
 ### Must Do (blocks security sign-off)
 1. **Replace auto-generated IAM role** on `alexa` (eu-west-1) with `digilux-alexa-fulfillment-role`
@@ -309,7 +457,7 @@ available via AWS Artifact on request.
 
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 Deploying the Alexa Smart Home fulfillment Lambda to AWS eu-west-1 (Ireland) is a **mandatory
 Amazon requirement** for Indian marketplace customers — not an architectural choice. Without
