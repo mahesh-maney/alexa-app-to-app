@@ -3,7 +3,7 @@
 **Prepared by**: Digilux Engineering Team
 **Date**: 2026-10-01
 **Classification**: Internal — Management / Technology / Cybersecurity
-**Version**: 2.0
+**Version**: 3.0
 
 ---
 
@@ -29,7 +29,8 @@ the device never receives the command.
 
 **Lambda name**: `alexa` (Smart Home fulfillment)
 **Region**: eu-west-1 (Ireland)
-**AWS Account**: Honeywell
+**AWS Account**: Honeywell Nucleus Team
+**Network**: Deployed inside Spoke VPC 1, Private Subnet — no public internet access
 
 This is the only AWS resource deployed in Ireland. Every other resource stays in us-east-1.
 
@@ -49,22 +50,26 @@ This Lambda handles three voice command intents:
 [INDIA — Customer]
   └─► "Alexa, turn on the light"
          │
+         │  HTTPS, TLS 1.2+  →  CloudFront + WAF + Shield (AWS Edge)
          │  Amazon routes to eu-west-1 (mandatory for India)
          │  HTTPS POST — signed by Amazon  (TLS 1.3)
          ▼
 [eu-west-1 — Ireland — alexa Lambda]   ← only resource in Ireland
+[Private Subnet, Spoke VPC 1]
          │
     ┌────┴──────────────────────┐
     │                           │
     ▼                           ▼
 [eu-west-1]               [us-east-1 — Virginia]
-Secrets Manager            DynamoDB
+Secrets Manager            Aurora Serverless Postgres / RDS
 (AES key, LWA creds)      (user tokens, device map)
+via VPC Endpoint          via Transit Gateway → Spoke VPC 2
                                 │
                                 ▼
                           [us-east-1 — Virginia]
                            AWS IoT Core
                            (MQTT publish)
+                           via VPC Endpoint
                                 │
                                 │  MQTT over TLS 1.2
                                 ▼
@@ -76,17 +81,19 @@ Secrets Manager            DynamoDB
 
 | Sender | What It Sends | How |
 |--------|--------------|-----|
-| **Amazon Alexa Cloud** | Signed HTTPS directive (SYNC / QUERY / EXECUTE) | HTTPS POST to Lambda URL |
+| **Amazon Alexa Cloud** | Signed HTTPS directive (SYNC / QUERY / EXECUTE) | HTTPS POST — enters via CloudFront → WAF → API Gateway |
 
 No one else can call this Lambda. Amazon is the only caller.
 
 ### What the Ireland Lambda calls OUT TO
 
-| Resource | Region | Why |
-|----------|--------|-----|
-| **Secrets Manager** | eu-west-1 | Retrieve AES-GCM encryption key and LWA credentials |
-| **DynamoDB** | us-east-1 | Look up user's device mapping and tokens |
-| **IoT Core** | us-east-1 | Publish MQTT command to physical device |
+| Resource | Region | How | Why |
+|----------|--------|-----|-----|
+| **Secrets Manager** | eu-west-1 | VPC Endpoint (private) | Retrieve AES-GCM encryption key and LWA credentials |
+| **Aurora Postgres / RDS** | us-east-1 | Transit Gateway → Spoke VPC 2 (private) | Look up user tokens and device mapping |
+| **IoT Core** | us-east-1 | VPC Endpoint (private) | Publish MQTT command to physical device |
+
+All outbound calls travel over private AWS network paths — never over the public internet.
 
 ---
 
@@ -94,40 +101,56 @@ No one else can call this Lambda. Amazon is the only caller.
 
 **No. None of these resources are publicly accessible.**
 
-| Resource | Exposed to Internet? | Who Can Access It |
-|----------|---------------------|------------------|
-| `alexa` Lambda (eu-west-1) | No | Only Amazon Alexa Cloud (enforced by Lambda resource policy) |
-| Secrets Manager (eu-west-1) | No | Only the `alexa` Lambda IAM role |
-| DynamoDB (us-east-1) | No | Only the `alexa` Lambda IAM role (specific table ARNs only) |
-| IoT Core (us-east-1) | No | Only the `alexa` Lambda IAM role (specific topic pattern only) |
-| Physical Device connection | No | Device initiates outbound MQTT to IoT Core — no inbound exposure |
+The Honeywell Nucleus architecture enforces multiple layers of network isolation:
+
+| Resource | Exposed to Internet? | Network Protection | Access Control |
+|----------|---------------------|--------------------|---------------|
+| `alexa` Lambda (eu-west-1) | **No** | Private Subnet, Spoke VPC 1 | Only Amazon Alexa Cloud via signed request |
+| Secrets Manager (eu-west-1) | **No** | VPC Endpoint — no public route | Only `alexa` Lambda IAM role |
+| Aurora Postgres / RDS (us-east-1) | **No** | Private Subnet, Spoke VPC 2, no internet gateway | Only Application Tier Lambdas via Transit Gateway |
+| IoT Core (us-east-1) | **No** | VPC Endpoint — no public route | Only `alexa` Lambda IAM role (specific topics only) |
+| Physical Device connection | **No** | Device initiates outbound MQTT — no inbound port open | AWS IoT Device Defender monitors for anomalies |
+
+**Additional edge protection** (applies to all inbound traffic):
+- **Amazon CloudFront** — CDN + TLS termination
+- **AWS WAF** — blocks malicious HTTP requests, SQL injection, XSS
+- **AWS Shield Standard** — always-on DDoS protection
 
 ---
 
 ## 5. How Secure Are These Resources?
 
 ### The Lambda (eu-west-1)
+- Sits inside a **Private Subnet in Spoke VPC 1** — has no direct internet-facing interface
 - Invoked exclusively by Amazon Alexa Cloud via a signed HTTPS request
-- Lambda validates Amazon's signature on every request — spoofed calls are rejected
-- No public URL accessible to anyone other than Amazon's Alexa backend
+- Lambda validates Amazon's signature on every request — spoofed calls are rejected before processing
+- All inbound traffic passes through **CloudFront → WAF → Shield** before reaching the Lambda
 - Code is encrypted at rest (AES-256, AWS-managed)
 - AWS engineers cannot access your Lambda code — covered under AWS SOC 2 Type II audit
 
 ### Secrets Manager (eu-west-1)
-- Stores the AES-GCM encryption key and LWA client credentials
+- Accessed via **VPC Endpoint** — traffic never leaves the AWS private network
 - Accessible only via IAM — only the `alexa` Lambda's execution role has `GetSecretValue`
 - No secret is hardcoded in code or environment variables
 - All values encrypted at rest (AES-256)
 
-### DynamoDB (us-east-1)
-- IAM policy grants access only to the specific tables needed — no wildcard permissions
-- The Lambda only reads from these tables during a voice command — no write access except for token refresh
-- Not accessible from the public internet — AWS VPC-level isolation
+### Database — Aurora Serverless v2 Postgres / RDS (us-east-1)
+- Lives in **Spoke VPC 2, Private Subnet** — completely isolated from the internet
+- The Lambda reaches it via **Transit Gateway** over a private, encrypted path
+- No public endpoint — cannot be accessed from outside the AWS internal network
+- Aurora Serverless v2 automatically scales and is encrypted at rest
 
 ### IoT Core (us-east-1)
-- Lambda can only publish to `iot/device/*/request` and `iot/device/*/scene` topics
+- Accessed via **VPC Endpoint** — no public internet traversal
+- Lambda can only publish to `iot/device/*/request` and `iot/device/*/scene` topics (IAM-scoped)
 - Cannot subscribe, cannot read other topics, cannot access other devices' data
-- Physical device connects outbound over MQTT/TLS — no inbound port is open on the device
+- **AWS IoT Device Defender** monitors all IoT traffic in real-time for anomalous behaviour,
+  unauthorized access attempts, and policy violations — alerts raised automatically
+
+### Physical Device
+- Connects outbound over MQTT/TLS 1.2 to IoT Core — no inbound port is open on the device
+- Device identity verified by IoT Core certificates
+- IoT Device Defender continuously audits device-level security posture
 
 ### Data in Transit
 Every hop in the flow is encrypted:
@@ -135,11 +158,12 @@ Every hop in the flow is encrypted:
 | Hop | Encryption |
 |-----|-----------|
 | Customer → Alexa Cloud | TLS (Amazon-managed) |
-| Alexa Cloud → Lambda | TLS 1.3 |
-| Lambda → Secrets Manager | TLS 1.2+ (AWS SDK) |
-| Lambda → DynamoDB | TLS 1.2+ (AWS SDK) |
-| Lambda → IoT Core | TLS 1.2+ (AWS SDK) |
-| IoT Core → Device | MQTT over TLS 1.2 |
+| Alexa Cloud → CloudFront / WAF | TLS 1.2+ |
+| CloudFront → Lambda | TLS 1.3 |
+| Lambda → Secrets Manager | TLS 1.2+ via VPC Endpoint |
+| Lambda → Aurora / RDS | TLS 1.2+ via Transit Gateway |
+| Lambda → IoT Core | TLS 1.2+ via VPC Endpoint |
+| IoT Core → Physical Device | MQTT over TLS 1.2 |
 
 No data travels unencrypted at any point.
 
@@ -153,9 +177,14 @@ key never leaves AWS Secrets Manager.
 ## 6. Audit and Visibility
 
 All access to the Ireland Lambda — every invocation, every deployment, every IAM change —
-is captured by AWS CloudTrail which is active and multi-region (covers eu-west-1).
+is captured by:
 
-Logs are retained in S3 and available for audit at any time.
+- **AWS CloudTrail** — active, multi-region, covers eu-west-1. Logs stored in S3.
+- **AWS IoT Device Defender** — real-time monitoring of all IoT traffic and device behaviour
+- **Amazon CloudWatch** — Lambda execution logs, errors, latency metrics
+- **AWS Audit Trail** — all API-level activity across the account
+
+All logs are retained and available for audit at any time.
 
 ---
 
@@ -163,9 +192,9 @@ Logs are retained in S3 and available for audit at any time.
 
 | # | Item | Risk | Action |
 |---|------|------|--------|
-| 1 | `alexa` Lambda uses auto-generated IAM role (`alexa-role-zt15wjgn`) | Medium | Replace with purpose-built `digilux-alexa-fulfillment-role` with least-privilege |
-| 2 | Alexa request signature validation — confirm it is implemented | Medium | Review Lambda code and confirm |
-| 3 | DynamoDB tables use AWS-owned encryption keys, not CMK | Low | Create customer-managed KMS key and apply to token tables |
+| 1 | `alexa` Lambda uses auto-generated IAM role (`alexa-role-zt15wjgn`) | Medium | Replace with purpose-built `honeywell-alexa-fulfillment-role` with least-privilege, following Honeywell naming standards |
+| 2 | Alexa request signature validation — confirm it is implemented in code | Medium | Review Lambda code and confirm before go-live |
+| 3 | Aurora / RDS encryption — confirm CMK is applied | Low | Verify customer-managed KMS key (`alias/digilux/honeywell/rds`) is applied to the Alexa token tables |
 
 ---
 
