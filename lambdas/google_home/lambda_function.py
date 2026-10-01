@@ -38,8 +38,8 @@ _DEVICE_STATE_TABLE = os.environ.get("DEVICE_STATE_TABLE", "device_state")
 _METADATA_BUCKET    = os.environ.get("METADATA_BUCKET", "digilux-metadata-bucket")
 _GH_TOKENS_TABLE    = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
 _GH_PROACTIVE_FN    = os.environ.get("GH_PROACTIVE_FUNCTION", "")
-_DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "Honeywell Technologies")
-_DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "Nucleus Smart Device")
+_DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "Digilux")
+_DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "Digilux Smart Device")
 
 # ── Device-type classification (same frozensets as Alexa lambda) ──────────────
 _SWITCH_TYPES = frozenset({1})
