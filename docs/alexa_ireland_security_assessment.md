@@ -20,7 +20,7 @@ cybersecurity review.
 
 **Bottom line**: The deployment follows AWS security best practices. All sensitive credentials
 are in AWS Secrets Manager. Audit logging is active. The architecture is stateless in Ireland —
-all customer data stays in India (ap-south-1). The primary open items are IAM role cleanup and
+all customer data stays in US (us-east-1). The primary open items are IAM role cleanup and
 DynamoDB CMK encryption — both low-risk with straightforward remediation.
 
 ---
@@ -36,7 +36,7 @@ Amazon routes Alexa Smart Home skill invocations based on the customer's marketp
 | North America (US, CA, MX) | us-east-1 | us-east-1 (Virginia) |
 | Far East (JP, AU) | us-west-2 | us-west-2 (Oregon) |
 
-**If the Lambda is only in ap-south-1 (India)**: Indian customers' voice commands ("Alexa,
+**If the Lambda is only in us-east-1 (US)**: Indian customers' voice commands ("Alexa,
 turn on the fan") are routed to eu-west-1 by Amazon's infrastructure and find no Lambda there.
 The skill silently fails — the device does not respond.
 
@@ -52,16 +52,16 @@ This is the most important architectural clarification:
 | Lambda | Region | Invoked By | Must Be in eu-west-1? |
 |--------|--------|-----------|----------------------|
 | `alexa` (Smart Home fulfillment) | **eu-west-1** | Amazon Alexa Cloud | **Yes — Amazon requirement** |
-| `alexa_start_app_to_app` | ap-south-1 | Flutter app (via API Gateway) | No |
-| `alexa_complete_app_to_app` | ap-south-1 | Flutter app (via API Gateway) | No |
-| `alexa_link_status` | ap-south-1 | Flutter app (via API Gateway) | No |
-| `alexa_unlink` | ap-south-1 | Flutter app (via API Gateway) | No |
-| `alexa_callback` | ap-south-1 | Browser redirect (via API Gateway) | No |
-| `alexa_skill_events` | ap-south-1 | Amazon Alexa skill events | No |
+| `alexa_start_app_to_app` | us-east-1 | Flutter app (via API Gateway) | No |
+| `alexa_complete_app_to_app` | us-east-1 | Flutter app (via API Gateway) | No |
+| `alexa_link_status` | us-east-1 | Flutter app (via API Gateway) | No |
+| `alexa_unlink` | us-east-1 | Flutter app (via API Gateway) | No |
+| `alexa_callback` | us-east-1 | Browser redirect (via API Gateway) | No |
+| `alexa_skill_events` | us-east-1 | Amazon Alexa skill events | No |
 
 Only the `alexa` Smart Home fulfillment Lambda (handles SYNC/QUERY/EXECUTE/DISCONNECT directives)
 must be in eu-west-1. The App-to-App account linking Lambdas are called by the Digilux Flutter
-app through API Gateway in ap-south-1 — they are correctly placed in India.
+app through API Gateway in us-east-1 — they are correctly placed in US.
 
 **Current status**: The `alexa` Lambda is already deployed in eu-west-1 (last updated
 2026-08-22). This requirement is already met.
@@ -84,7 +84,7 @@ Amazon Alexa Cloud (routes to eu-west-1)
     ┌────┴────────────────────────┐
     ▼                             ▼
 Secrets Manager              DynamoDB / IoT Core
-(eu-west-1)                  (ap-south-1 — India)
+(eu-west-1)                  (us-east-1 — US)
 [LWA tokens, AES key]        [user tokens, device state]
                                     │
                                     ▼
@@ -94,13 +94,13 @@ Secrets Manager              DynamoDB / IoT Core
 
 Flutter App (Account Linking — separate flow)
          │
-         │  HTTPS via API Gateway (ap-south-1)
+         │  HTTPS via API Gateway (us-east-1)
          ▼
-App-to-App Lambdas (ap-south-1) — alexa_start, alexa_complete, etc.
+App-to-App Lambdas (us-east-1) — alexa_start, alexa_complete, etc.
 ```
 
-**Key principle**: The eu-west-1 Lambda is **stateless**. It reads data from ap-south-1 and
-publishes commands to IoT Core in ap-south-1. No customer data is written to or stored in Ireland.
+**Key principle**: The eu-west-1 Lambda is **stateless**. It reads data from us-east-1 and
+publishes commands to IoT Core in us-east-1. No customer data is written to or stored in Ireland.
 
 ---
 
@@ -108,16 +108,16 @@ publishes commands to IoT Core in ap-south-1. No customer data is written to or 
 
 | Data Type | Where Stored | Jurisdiction |
 |-----------|-------------|--------------|
-| Alexa LWA tokens (access + refresh) | DynamoDB — ap-south-1 | India |
-| User-device mapping | DynamoDB — ap-south-1 | India |
-| Device state (on/off, brightness) | DynamoDB — ap-south-1 | India |
+| Alexa LWA tokens (access + refresh) | DynamoDB — us-east-1 | US |
+| User-device mapping | DynamoDB — us-east-1 | US |
+| Device state (on/off, brightness) | DynamoDB — us-east-1 | US |
 | LWA OAuth credentials | Secrets Manager — eu-west-1 | EU (Ireland) |
 | AES endpoint encryption key | Secrets Manager — eu-west-1 | EU (Ireland) |
 | Lambda execution (compute) | eu-west-1 (transient, in-memory only) | EU (Ireland) |
-| Audit logs (CloudTrail) | S3 — multi-region | India + EU |
+| Audit logs (CloudTrail) | S3 — multi-region | US + EU |
 
-**Important for the architect**: Customer PII and device data are stored exclusively in India
-(ap-south-1). The eu-west-1 Lambda processes requests in-memory and does not persist any
+**Important for the architect**: Customer PII and device data are stored exclusively in US
+(us-east-1). The eu-west-1 Lambda processes requests in-memory and does not persist any
 customer data in Ireland. The LWA credentials in eu-west-1 Secrets Manager are service
 credentials (API keys), not customer personal data.
 
@@ -134,7 +134,7 @@ or environment variables.
 |--------|----------|---------|
 | LWA OAuth credentials (Client ID + Secret) | Secrets Manager — eu-west-1 | `alexa` (eu-west-1), `alexa_complete_app_to_app`, `alexa_unlink` |
 | AES-GCM endpoint encryption key | Secrets Manager — eu-west-1 | `alexa` (eu-west-1) |
-| Device table encryption secret | Secrets Manager — ap-south-1 | `alexa` (eu-west-1) |
+| Device table encryption secret | Secrets Manager — us-east-1 | `alexa` (eu-west-1) |
 
 The LWA secret is already in eu-west-1 (`arn:aws:secretsmanager:eu-west-1:...:digilux/alexa/lwa-7RDOUm`)
 which means the eu-west-1 Lambda retrieves it with minimal cross-region latency.
@@ -148,9 +148,9 @@ which means the eu-west-1 Lambda retrieves it with minimal cross-region latency.
 | Path | Protocol | Enforced By |
 |------|----------|------------|
 | Amazon Alexa Cloud → eu-west-1 Lambda | HTTPS / TLS 1.3 | AWS API Gateway |
-| Lambda → DynamoDB (ap-south-1) | TLS 1.2+ (AWS SDK) | AWS |
+| Lambda → DynamoDB (us-east-1) | TLS 1.2+ (AWS SDK) | AWS |
 | Lambda → Secrets Manager (eu-west-1) | TLS 1.2+ (AWS SDK) | AWS |
-| Lambda → IoT Core (ap-south-1) | TLS 1.2+ (AWS SDK) | AWS |
+| Lambda → IoT Core (us-east-1) | TLS 1.2+ (AWS SDK) | AWS |
 | IoT Core → Physical Device | MQTT over TLS 1.2 | AWS IoT |
 | Flutter App → API Gateway (account linking) | HTTPS / TLS 1.3 | AWS |
 
@@ -164,14 +164,14 @@ which means the eu-west-1 Lambda retrieves it with minimal cross-region latency.
 |----------|-----------|----------|--------|
 | Lambda code (eu-west-1) | AES-256 | AWS-owned key | Acceptable |
 | Secrets Manager values | AES-256 | AWS-owned key | Acceptable |
-| DynamoDB token tables (ap-south-1) | AES-256 | AWS-owned key | **Gap — upgrade to CMK** |
+| DynamoDB token tables (us-east-1) | AES-256 | AWS-owned key | **Gap — upgrade to CMK** |
 | CloudTrail logs (S3) | AES-256 | AWS-owned key | Acceptable |
 
 **Gap**: DynamoDB tables storing Alexa LWA tokens use AWS-owned keys. Encryption is active
 but Digilux has no independent key custody. Upgrading to a Customer Managed Key (CMK) gives
 full key rotation control and audit trail of every decrypt operation.
 
-**Recommendation**: Create `alias/digilux/alexa-tokens` CMK in ap-south-1 and apply to
+**Recommendation**: Create `alias/digilux/alexa-tokens` CMK in us-east-1 and apply to
 `digilux_honeywell_alexa_lwa_tokens` and `alexa_app_linking_sessions` tables.
 
 ---
@@ -185,7 +185,7 @@ rather than a purpose-built IAM role. This is a flag for a cybersecurity archite
 - Permissions may be broader than necessary
 - Naming convention does not follow Digilux standards (`digilux-*`)
 
-The App-to-App Lambdas in ap-south-1 use properly named dedicated roles:
+The App-to-App Lambdas in us-east-1 use properly named dedicated roles:
 
 | Lambda | IAM Role |
 |--------|---------|
@@ -246,7 +246,7 @@ network-layer controls.
 **Risk**: Low — all SDK calls enforce TLS. No unencrypted traffic is possible.
 
 **Recommendation**: For defence-in-depth, place the `alexa` Lambda in a VPC in eu-west-1
-with a VPC endpoint for Secrets Manager. Cross-region calls to ap-south-1 DynamoDB/IoT
+with a VPC endpoint for Secrets Manager. Cross-region calls to us-east-1 DynamoDB/IoT
 will continue over the AWS backbone (no VPC endpoint possible cross-region — this is acceptable).
 
 ---
@@ -288,7 +288,7 @@ available via AWS Artifact on request.
 | Auto-generated IAM role (eu-west-1) | Low | Medium | Replace with purpose-built role | **Open** |
 | DynamoDB tokens unprotected by CMK | Low | Low | Upgrade to CMK | Open — scheduled |
 | No VPC network isolation | Low | Low | TLS on all calls; acceptable | Open — low priority |
-| Cross-region data flow (eu-west-1 → ap-south-1) | N/A | Low | Documented; customer data stays in India | Documented |
+| Cross-region data flow (eu-west-1 → us-east-1) | N/A | Low | Documented; customer data stays in US | Documented |
 
 ---
 
@@ -296,11 +296,11 @@ available via AWS Artifact on request.
 
 ### Must Do (blocks security sign-off)
 1. **Replace auto-generated IAM role** on `alexa` (eu-west-1) with `digilux-alexa-fulfillment-role`
-   following least-privilege, matching the naming standard of ap-south-1 roles
+   following least-privilege, matching the naming standard of us-east-1 roles
 2. **Confirm Alexa request signature validation** is implemented in the eu-west-1 Lambda code
 
 ### Should Do (within 30 days)
-3. **Create CMK** `alias/digilux/alexa-tokens` in ap-south-1 and apply to Alexa DynamoDB tables
+3. **Create CMK** `alias/digilux/alexa-tokens` in us-east-1 and apply to Alexa DynamoDB tables
 4. **Enable explicit CloudTrail data events** for Alexa DynamoDB tables (token access audit trail)
 
 ### Nice to Have (next quarter)
@@ -321,7 +321,7 @@ logging is active and multi-region, and device identities are AES-GCM protected.
 
 Two items require attention before formal security sign-off: replacing the auto-generated IAM
 role with a purpose-built one, and confirming Alexa request signature validation. Both are
-low-effort changes. Customer data remains in India (ap-south-1) at all times. eu-west-1
+low-effort changes. Customer data remains in US (us-east-1) at all times. eu-west-1
 is stateless compute only.
 
 This architecture is standard, well-precedented, and appropriate for cybersecurity approval.
