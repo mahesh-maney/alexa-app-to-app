@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Google Home Integration — Technical Brief</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      line-height: 1.6;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    .header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      color: white;
+      padding: 48px 40px 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    .header::before {
+      content: '';
+      position: absolute;
+      top: -60px; right: -60px;
+      width: 300px; height: 300px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 50%;
+    }
+    .header-badge {
+      display: inline-block;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    .header h1 { font-size: 32px; font-weight: 700; margin-bottom: 8px; }
+    .header p  { font-size: 16px; opacity: 0.75; max-width: 600px; }
+    .header-meta {
+      margin-top: 24px;
+      display: flex;
+      gap: 32px;
+      font-size: 13px;
+      opacity: 0.65;
+    }
+
+    /* ── Layout ─────────────────────────────────────────── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 40px 24px; }
+
+    /* ── Section ─────────────────────────────────────────── */
+    .section {
+      background: white;
+      border-radius: 16px;
+      padding: 36px;
+      margin-bottom: 28px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    }
+    .section-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #0f3460;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-title .icon {
+      width: 32px; height: 32px;
+      background: #e8f0fe;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .section-subtitle {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 28px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    /* ── Status pills ────────────────────────────────────── */
+    .pill {
+      display: inline-block;
+      padding: 3px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill-green  { background: #e6f9f0; color: #0a7a47; border: 1px solid #b0ecd4; }
+    .pill-red    { background: #fef0f0; color: #c0392b; border: 1px solid #f5c0c0; }
+    .pill-orange { background: #fff5e6; color: #c07000; border: 1px solid #ffd9a0; }
+    .pill-blue   { background: #e8f0fe; color: #1a5fc8; border: 1px solid #b0ccf8; }
+
+    /* ── Status grid ─────────────────────────────────────── */
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+    }
+    .status-card {
+      border-radius: 12px;
+      padding: 20px;
+      border: 1px solid transparent;
+    }
+    .status-card.green  { background: #e6f9f0; border-color: #b0ecd4; }
+    .status-card.red    { background: #fef0f0; border-color: #f5c0c0; }
+    .status-card.orange { background: #fff5e6; border-color: #ffd9a0; }
+    .status-card .sc-icon { font-size: 28px; margin-bottom: 8px; }
+    .status-card .sc-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.6; }
+    .status-card .sc-value { font-size: 15px; font-weight: 700; margin-top: 4px; }
+
+    /* ── Diagram wrapper ──────────────────────────────────── */
+    .diagram-wrap {
+      background: #fafbff;
+      border: 1px solid #e8eaf0;
+      border-radius: 12px;
+      padding: 28px 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    .diagram-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #888;
+      margin-bottom: 16px;
+    }
+
+    /* ── Step list ───────────────────────────────────────── */
+    .step-list { list-style: none; margin-top: 16px; }
+    .step-list li {
+      display: flex;
+      gap: 16px;
+      padding: 14px 0;
+      border-bottom: 1px solid #f5f5f5;
+    }
+    .step-list li:last-child { border-bottom: none; }
+    .step-num {
+      width: 28px; height: 28px;
+      min-width: 28px;
+      border-radius: 50%;
+      background: #0f3460;
+      color: white;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .step-num.green  { background: #0a7a47; }
+    .step-num.orange { background: #c07000; }
+    .step-num.red    { background: #c0392b; }
+    .step-content .step-title { font-weight: 600; font-size: 15px; }
+    .step-content .step-desc  { font-size: 13px; color: #666; margin-top: 3px; }
+
+    /* ── Payload boxes ───────────────────────────────────── */
+    .payload-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    @media(max-width: 700px) { .payload-grid { grid-template-columns: 1fr; } }
+    .payload-box {
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid #e0e0e0;
+    }
+    .payload-box-header {
+      padding: 10px 16px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .payload-box-header.request  { background: #1a1a2e; color: #7eb8f7; }
+    .payload-box-header.response { background: #0a7a47; color: #b0ecd4; }
+    .payload-box-header.storage  { background: #6a0dad; color: #e0b0ff; }
+    .payload-box-header.error    { background: #c0392b; color: #f5c0c0; }
+    pre {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 16px;
+      font-size: 12.5px;
+      line-height: 1.7;
+      overflow-x: auto;
+    }
+    .kw   { color: #89b4fa; }  /* key */
+    .str  { color: #a6e3a1; }  /* string value */
+    .num  { color: #fab387; }  /* number */
+    .cmt  { color: #6c7086; font-style: italic; }
+
+    /* ── Table ───────────────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13.5px; }
+    th {
+      background: #0f3460;
+      color: white;
+      padding: 12px 16px;
+      text-align: left;
+      font-weight: 600;
+    }
+    td { padding: 11px 16px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    tr:nth-child(even) td { background: #fafafa; }
+    tr:last-child td { border-bottom: none; }
+
+    /* ── Timeline ───────────────────────────────────────── */
+    .timeline { margin-top: 20px; }
+    .tl-item {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 0;
+      position: relative;
+    }
+    .tl-item::before {
+      content: '';
+      position: absolute;
+      left: 19px;
+      top: 40px;
+      bottom: 0;
+      width: 2px;
+      background: #e0e0e0;
+    }
+    .tl-item:last-child::before { display: none; }
+    .tl-dot {
+      width: 40px; height: 40px;
+      min-width: 40px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      position: relative;
+      z-index: 1;
+    }
+    .tl-dot.green  { background: #e6f9f0; }
+    .tl-dot.red    { background: #fef0f0; }
+    .tl-dot.orange { background: #fff5e6; }
+    .tl-dot.blue   { background: #e8f0fe; }
+    .tl-body { padding-bottom: 28px; flex: 1; }
+    .tl-time { font-size: 11px; color: #888; font-weight: 600; margin-bottom: 2px; }
+    .tl-title { font-weight: 700; font-size: 15px; }
+    .tl-desc { font-size: 13px; color: #555; margin-top: 4px; }
+
+    /* ── Callout ─────────────────────────────────────────── */
+    .callout {
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin: 16px 0;
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+    .callout.warn   { background: #fff5e6; border-left: 4px solid #f0a000; }
+    .callout.info   { background: #e8f0fe; border-left: 4px solid #1a5fc8; }
+    .callout.danger { background: #fef0f0; border-left: 4px solid #c0392b; }
+    .callout.ok     { background: #e6f9f0; border-left: 4px solid #0a7a47; }
+    .callout-icon { font-size: 22px; line-height: 1; }
+    .callout-body .callout-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+    .callout-body p { font-size: 13px; color: #444; }
+
+    /* ── Footer ──────────────────────────────────────────── */
+    .footer {
+      text-align: center;
+      padding: 32px;
+      font-size: 12px;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-badge">Technical Brief — Confidential</div>
+  <h1>Google Home Integration</h1>
+  <p>End-to-end account linking flow, token lifecycle, current deployment status, and outstanding blockers.</p>
+  <div class="header-meta">
+    <span>📅 September 2026</span>
+    <span>🏗 Environment: Digilux QA — ap-south-1</span>
+    <span>📋 Prepared for: Nitin (SA)</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- ── 1. Executive Summary ─────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">⚡</span> TL;DR — Current Status</div>
+    <div class="section-subtitle">What works, what doesn't, and why.</div>
+
+    <div class="status-grid">
+      <div class="status-card green">
+        <div class="sc-icon">✅</div>
+        <div class="sc-label">Backend</div>
+        <div class="sc-value">All 7 Lambdas deployed &amp; healthy</div>
+      </div>
+      <div class="status-card green">
+        <div class="sc-icon">✅</div>
+        <div class="sc-label">App Flip (Android)</div>
+        <div class="sc-value">Fires correctly, auth code issued every attempt</div>
+      </div>
+      <div class="status-card green">
+        <div class="sc-icon">✅</div>
+        <div class="sc-label">Auth Code Issuance</div>
+        <div class="sc-value">Correct code + redirect URI returned to Google</div>
+      </div>
+      <div class="status-card green">
+        <div class="sc-icon">✅</div>
+        <div class="sc-label">Unlinking</div>
+        <div class="sc-value">Works seamlessly from the Digilux app</div>
+      </div>
+      <div class="status-card orange">
+        <div class="sc-icon">⏳</div>
+        <div class="sc-label">Token Exchange</div>
+        <div class="sc-value">Blocked by Google 24–48h project backoff</div>
+      </div>
+      <div class="status-card red">
+        <div class="sc-icon">🔴</div>
+        <div class="sc-label">Voice Commands (EXECUTE)</div>
+        <div class="sc-value">Stub only — device control API not yet wired</div>
+      </div>
+    </div>
+
+    <div class="callout warn" style="margin-top:24px">
+      <span class="callout-icon">⚠️</span>
+      <div class="callout-body">
+        <div class="callout-title">Google Project-Level Backoff Active</div>
+        <p>On Sept 18th, an incorrect <code>client_secret</code> was briefly entered in the Google Console. This caused Google to receive <code>invalid_client</code> errors and apply a 24–72 hour project-level backoff — Google stops calling our <code>/token</code> endpoint entirely during this window. Everything on our side is correct. We just need to wait for the backoff to clear before end-to-end testing can complete.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 2. Architecture ──────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">🏗</span> System Architecture</div>
+    <div class="section-subtitle">How the Digilux app, AWS backend, and Google Home cloud fit together.</div>
+
+    <div class="diagram-wrap">
+      <div class="diagram-label">Component Overview</div>
+      <div class="mermaid">
+graph LR
+    subgraph Phone["📱 Android Device"]
+        A[Digilux App\nFlutter]
+        B[Google Home App]
+    end
+
+    subgraph AWS["☁️ AWS — ap-south-1"]
+        C[API Gateway\nds6nxf8ac5]
+        subgraph Lambdas["Lambda Functions"]
+            D[gh_start]
+            E[gh_complete]
+            F[gh_status]
+            G[gh_unlink]
+            H[gh_oauth_authorize]
+            I[gh_oauth_token]
+            J[gh_fulfillment]
+        end
+        subgraph DDB["DynamoDB Tables"]
+            K[(gh_link_sessions)]
+            L[(gh_auth_codes)]
+            M[(gh_tokens)]
+        end
+        N[(Cognito\nUser Pool)]
+        O[(Secrets Manager\nOAuth Secret)]
+    end
+
+    subgraph Google["🌐 Google Cloud"]
+        P[Google Home\nCloud Backend]
+        Q[OAuth Redirect\nEndpoint]
+    end
+
+    A -->|App Flip / REST| C
+    B -->|Account Linking| P
+    C --> D & E & F & G & H & I & J
+    D --> K
+    H --> K & L & N
+    I --> L & M & O
+    F --> M
+    G --> M & O
+    J --> M
+    P -->|Token Exchange| I
+    P -->|SYNC / QUERY / EXECUTE| J
+    A -->|Status Poll 2s| F
+
+style Phone fill:#e8f0fe,stroke:#1a5fc8
+style AWS fill:#fff5e6,stroke:#f0a000
+style Google fill:#e6f9f0,stroke:#0a7a47
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 3. App Flip Flow ──────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">🔗</span> Happy Path — App Flip Linking Flow</div>
+    <div class="section-subtitle">When the user taps "Link Google Home" inside the Digilux app on a real Android device with GMS.</div>
+
+    <div class="callout info">
+      <span class="callout-icon">ℹ️</span>
+      <div class="callout-body">
+        <div class="callout-title">What is App Flip?</div>
+        <p>App Flip is Google's Android-only mechanism that skips the browser-based OAuth login. Instead of showing a web page, Google sends a direct Android intent to the Digilux app. Since the user is already logged into Digilux, they get linked without typing credentials again.</p>
+      </div>
+    </div>
+
+    <div class="diagram-wrap">
+      <div class="diagram-label">App Flip — Sequence Diagram</div>
+      <div class="mermaid">
+sequenceDiagram
+    participant U as 👤 User
+    participant DA as 📱 Digilux App
+    participant GH as 🏠 Google Home App
+    participant GC as 🌐 Google Cloud
+    participant AU as ⚡ /authorize Lambda
+    participant TK as ⚡ /token Lambda
+    participant DB as 🗄 DynamoDB
+
+    U->>DA: Taps "Link Google Home"
+    DA->>DA: POST /voice/google-home/account-linking/deep-link/start
+    DA->>DB: Store session (state UUID, userId, TTL 1800s)
+    DA->>GH: Open Google Home deep link
+
+    GH->>DA: App Flip Intent<br/>(CLIENT_ID, REDIRECT_URI, SCOPE)
+    Note over GH,DA: Android intent — no browser!
+
+    DA->>AU: POST /google-home/oauth/authorize<br/>Bearer: Cognito access_token<br/>Body: CLIENT_ID, REDIRECT_URI, SCOPE
+    AU->>AU: Validate access token via Cognito
+    AU->>DB: Store auth code (code, userId, TTL 900s)
+    AU-->>DA: 200 {"code": "ZMoYqpKc...", "state": ""}
+
+    DA->>GH: setResult(RESULT_OK, authorizationCode=ZMoYqpKc...)
+
+    GH->>GC: Send auth code to Google servers
+    Note over GH,GC: This is where backoff blocks us currently
+
+    GC->>TK: POST /google-home/oauth/token<br/>grant_type=authorization_code<br/>code=ZMoYqpKc...<br/>client_id=75gmuum6...<br/>client_secret=g41e4h2i...
+
+    TK->>DB: Fetch &amp; delete auth code
+    TK->>DB: Store access_token + refresh_token (userId, TTL)
+    TK-->>GC: 200 {"access_token":"...", "refresh_token":"...", "expires_in":3600}
+
+    GC-->>GH: Linking complete ✅
+
+    loop Every 2 seconds (up to 10 min)
+        DA->>AU: GET /voice/google-home/account-linking
+        AU->>DB: Check google_home_tokens for userId
+        AU-->>DA: {"linked": true, "agentId": "digilux-ai-pro"}
+    end
+
+    DA->>U: Shows "Google Home Linked ✅"
+      </div>
+    </div>
+
+    <h3 style="margin-top:24px; font-size:16px; color:#0f3460;">Step-by-Step Breakdown</h3>
+    <ul class="step-list">
+      <li>
+        <div class="step-num green">1</div>
+        <div class="step-content">
+          <div class="step-title">User taps "Link Google Home"</div>
+          <div class="step-desc">Flutter app calls our <code>POST /deep-link/start</code> — creates a session record with a UUID state and 30-min TTL in DynamoDB. Then opens a Google Home deep link URL.</div>
+        </div>
+      </li>
+      <li>
+        <div class="step-num green">2</div>
+        <div class="step-content">
+          <div class="step-title">Google Home sends App Flip intent</div>
+          <div class="step-desc">GH app detects that the Digilux package is installed and sends an Android intent with <code>CLIENT_ID</code>, <code>REDIRECT_URI</code>, <code>SCOPE</code> — no browser opens.</div>
+        </div>
+      </li>
+      <li>
+        <div class="step-num green">3</div>
+        <div class="step-content">
+          <div class="step-title">Digilux app posts access token to /authorize</div>
+          <div class="step-desc">The Flutter MethodChannel returns the Cognito access token. The Android Activity POSTs it to our Lambda which validates it against Cognito, then issues an auth code (900s TTL).</div>
+        </div>
+      </li>
+      <li>
+        <div class="step-num green">4</div>
+        <div class="step-content">
+          <div class="step-title">Auth code returned to Google Home app</div>
+          <div class="step-desc">The Activity calls <code>setResult(RESULT_OK)</code> with the auth code. Google Home app receives it and forwards it to Google's cloud backend.</div>
+        </div>
+      </li>
+      <li>
+        <div class="step-num orange">5</div>
+        <div class="step-content">
+          <div class="step-title">⏳ Google Cloud calls our /token endpoint — CURRENTLY BLOCKED</div>
+          <div class="step-desc">Google's backend calls <code>POST /google-home/oauth/token</code> to exchange the auth code for access + refresh tokens. This step is blocked by the current project-level backoff.</div>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">6</div>
+        <div class="step-content">
+          <div class="step-title">Tokens stored — linking complete</div>
+          <div class="step-desc">On success our Lambda stores the token pair in <code>google_home_tokens</code> DynamoDB table. The Flutter app's 2-second status poll detects <code>linked=true</code> and updates the UI.</div>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- ── 4. Payload Details ────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">📦</span> Payload Details — What Gets Sent at Each Step</div>
+    <div class="section-subtitle">Exact request/response bodies and what gets stored in DynamoDB.</div>
+
+    <!-- Step A -->
+    <h3 style="font-size:15px; color:#0f3460; margin: 24px 0 12px;">A — App Flip: Digilux App → /authorize Lambda</h3>
+    <div class="payload-grid">
+      <div class="payload-box">
+        <div class="payload-box-header request">→ REQUEST (POST)</div>
+        <pre><span class="cmt">POST /google-home/oauth/authorize
+Authorization: Bearer &lt;Cognito_access_token&gt;
+Content-Type: application/json</span>
+
+{
+  <span class="kw">"CLIENT_ID"</span>:    <span class="str">"75gmuum6qhfjsedrvck809oie6"</span>,
+  <span class="kw">"REDIRECT_URI"</span>: <span class="str">"https://oauth-redirect.googleusercontent.com
+             /r/digilux-ai-pro"</span>,
+  <span class="kw">"SCOPE"</span>:        <span class="str">["profile"]</span>
+}</pre>
+      </div>
+      <div class="payload-box">
+        <div class="payload-box-header response">← RESPONSE (200 OK)</div>
+        <pre><span class="cmt">// Returned to the Google Home app
+// via Android setResult(RESULT_OK)</span>
+
+{
+  <span class="kw">"code"</span>:  <span class="str">"ZMoYqpKc7x..."</span>,  <span class="cmt">// 32-char random</span>
+  <span class="kw">"state"</span>: <span class="str">""</span>               <span class="cmt">// empty — App Flip by design</span>
+}</pre>
+      </div>
+    </div>
+
+    <!-- Step B -->
+    <h3 style="font-size:15px; color:#0f3460; margin: 28px 0 12px;">B — Google Cloud → /token Lambda (auth code exchange)</h3>
+    <div class="payload-grid">
+      <div class="payload-box">
+        <div class="payload-box-header request">→ REQUEST (POST) from Google</div>
+        <pre><span class="cmt">POST /google-home/oauth/token
+Content-Type: application/x-www-form-urlencoded</span>
+
+grant_type=<span class="str">authorization_code</span>
+&amp;code=<span class="str">ZMoYqpKc7x...</span>
+&amp;client_id=<span class="str">75gmuum6qhfjsedrvck809oie6</span>
+&amp;client_secret=<span class="str">g41e4h2i3he...</span>  <span class="cmt">← from Secrets Manager</span>
+&amp;redirect_uri=<span class="str">https://oauth-redirect.googleusercontent.com
+              /r/digilux-ai-pro</span></pre>
+      </div>
+      <div class="payload-box">
+        <div class="payload-box-header response">← RESPONSE (200 OK)</div>
+        <pre>{
+  <span class="kw">"access_token"</span>:  <span class="str">"at_abc123..."</span>,
+  <span class="kw">"refresh_token"</span>: <span class="str">"rt_xyz789..."</span>,
+  <span class="kw">"token_type"</span>:    <span class="str">"Bearer"</span>,
+  <span class="kw">"expires_in"</span>:    <span class="num">3600</span>   <span class="cmt">// 1 hour</span>
+}</pre>
+      </div>
+    </div>
+
+    <!-- Step C -->
+    <h3 style="font-size:15px; color:#0f3460; margin: 28px 0 12px;">C — Token Refresh (Google calls /token automatically when access token expires)</h3>
+    <div class="payload-grid">
+      <div class="payload-box">
+        <div class="payload-box-header request">→ REQUEST (POST) from Google</div>
+        <pre><span class="cmt">POST /google-home/oauth/token</span>
+
+grant_type=<span class="str">refresh_token</span>
+&amp;refresh_token=<span class="str">rt_xyz789...</span>
+&amp;client_id=<span class="str">75gmuum6qhfjsedrvck809oie6</span>
+&amp;client_secret=<span class="str">g41e4h2i3he...</span></pre>
+      </div>
+      <div class="payload-box">
+        <div class="payload-box-header response">← RESPONSE (200 OK)</div>
+        <pre>{
+  <span class="kw">"access_token"</span>: <span class="str">"at_newtoken..."</span>,
+  <span class="kw">"token_type"</span>:   <span class="str">"Bearer"</span>,
+  <span class="kw">"expires_in"</span>:   <span class="num">3600</span>
+  <span class="cmt">// refresh_token NOT rotated — same one reused</span>
+}</pre>
+      </div>
+    </div>
+
+    <!-- Step D — Fulfillment -->
+    <h3 style="font-size:15px; color:#0f3460; margin: 28px 0 12px;">D — Google Assistant → Fulfillment Lambda (voice commands)</h3>
+    <div class="payload-grid">
+      <div class="payload-box">
+        <div class="payload-box-header request">→ SYNC Request (device discovery)</div>
+        <pre><span class="cmt">POST /google-home/fulfillment
+Authorization: Bearer &lt;access_token&gt;</span>
+
+{
+  <span class="kw">"requestId"</span>: <span class="str">"ff36..."</span>,
+  <span class="kw">"inputs"</span>: [{
+    <span class="kw">"intent"</span>: <span class="str">"action.devices.SYNC"</span>
+  }]
+}</pre>
+      </div>
+      <div class="payload-box">
+        <div class="payload-box-header response">← SYNC Response</div>
+        <pre>{
+  <span class="kw">"requestId"</span>: <span class="str">"ff36..."</span>,
+  <span class="kw">"payload"</span>: {
+    <span class="kw">"agentUserId"</span>: <span class="str">"f123dd2a-7061..."</span>,
+    <span class="kw">"devices"</span>: [{
+      <span class="kw">"id"</span>:           <span class="str">"digilux-hub-001"</span>,
+      <span class="kw">"type"</span>:         <span class="str">"action.devices.types.SWITCH"</span>,
+      <span class="kw">"traits"</span>:       [<span class="str">"action.devices.traits.OnOff"</span>],
+      <span class="kw">"name"</span>:         { <span class="kw">"name"</span>: <span class="str">"Living Room Light"</span> },
+      <span class="kw">"manufacturer"</span>: <span class="str">"Digilux"</span>
+    }]
+  }
+}</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 5. DynamoDB Tables ────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">🗄</span> DynamoDB — What Gets Stored</div>
+    <div class="section-subtitle">Three tables manage the full linking lifecycle. All use on-demand billing with TTL auto-expiry.</div>
+
+    <h3 style="font-size:15px; color:#0f3460; margin-bottom:12px;">Table 1 — <code>google_home_link_sessions</code></h3>
+    <p style="font-size:13px;color:#555;margin-bottom:10px;">Created when the user taps "Link Google Home". Prevents CSRF attacks. Expires after 30 minutes.</p>
+    <table>
+      <tr><th>Field</th><th>Type</th><th>Example</th><th>Purpose</th></tr>
+      <tr><td><code>state</code> 🔑</td><td>String (PK)</td><td><code>a1b2c3d4-e5f6-...</code></td><td>UUID generated per link attempt</td></tr>
+      <tr><td><code>userId</code></td><td>String</td><td><code>f123dd2a-7061-...</code></td><td>Cognito sub of the logged-in user</td></tr>
+      <tr><td><code>status</code></td><td>String</td><td><code>PENDING</code></td><td>Session state</td></tr>
+      <tr><td><code>createdAt</code></td><td>Number</td><td><code>1726840000</code></td><td>Unix timestamp</td></tr>
+      <tr><td><code>ttl</code></td><td>Number</td><td><code>1726841800</code></td><td>Auto-deleted after 1800s (30 min)</td></tr>
+    </table>
+
+    <h3 style="font-size:15px; color:#0f3460; margin: 28px 0 12px;">Table 2 — <code>google_home_auth_codes</code></h3>
+    <p style="font-size:13px;color:#555;margin-bottom:10px;">Stores the one-time auth code issued after login. Google must exchange it within 15 minutes or it expires.</p>
+    <table>
+      <tr><th>Field</th><th>Type</th><th>Example</th><th>Purpose</th></tr>
+      <tr><td><code>code</code> 🔑</td><td>String (PK)</td><td><code>ZMoYqpKc7x...</code></td><td>32-char random auth code</td></tr>
+      <tr><td><code>userId</code></td><td>String</td><td><code>f123dd2a-7061-...</code></td><td>Owner of this code</td></tr>
+      <tr><td><code>createdAt</code></td><td>Number</td><td><code>1726840051</code></td><td>Unix timestamp</td></tr>
+      <tr><td><code>ttl</code></td><td>Number</td><td><code>1726840951</code></td><td>Auto-deleted after 900s (15 min)</td></tr>
+    </table>
+
+    <h3 style="font-size:15px; color:#0f3460; margin: 28px 0 12px;">Table 3 — <code>google_home_tokens</code> — The Source of Truth</h3>
+    <p style="font-size:13px;color:#555;margin-bottom:10px;">Written when linking succeeds. Read on every voice command. Deleted on unlink.</p>
+    <table>
+      <tr><th>Field</th><th>Type</th><th>Example</th><th>Purpose</th></tr>
+      <tr><td><code>userId</code> 🔑</td><td>String (PK)</td><td><code>f123dd2a-7061-...</code></td><td>One record per linked user</td></tr>
+      <tr><td><code>accessToken</code></td><td>String</td><td><code>at_abc123...</code></td><td>Short-lived token (1 hour) — GSI indexed</td></tr>
+      <tr><td><code>refreshToken</code></td><td>String</td><td><code>rt_xyz789...</code></td><td>Long-lived token (180 days) — GSI indexed</td></tr>
+      <tr><td><code>agentId</code></td><td>String</td><td><code>digilux-ai-pro</code></td><td>Google Home project ID</td></tr>
+      <tr><td><code>linkedAt</code></td><td>String</td><td><code>1726840055</code></td><td>When the user first linked</td></tr>
+      <tr><td><code>expiresAt</code></td><td>Number</td><td><code>1726843655</code></td><td>When current access token expires</td></tr>
+      <tr><td><code>scope</code></td><td>String</td><td><code>profile</code></td><td>OAuth scope granted</td></tr>
+    </table>
+  </div>
+
+  <!-- ── 6. Token Lifecycle ────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">♻️</span> Token Lifecycle</div>
+    <div class="section-subtitle">How tokens are created, used, refreshed, and revoked.</div>
+
+    <div class="diagram-wrap">
+      <div class="diagram-label">Token State Machine</div>
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> NotLinked : User not linked
+
+    NotLinked --> AuthCodeIssued : User logs in\n+ auth code stored\n(TTL 900s)
+
+    AuthCodeIssued --> Linked : Google exchanges auth code\n→ access + refresh tokens stored
+
+    AuthCodeIssued --> NotLinked : Code expires (15 min)\nbefore Google exchanges it
+
+    Linked --> TokenRefreshed : Access token expires (1hr)\nGoogle calls /token with refresh_token\n→ new access token issued
+
+    TokenRefreshed --> Linked : Updated in DynamoDB
+
+    Linked --> NotLinked : User unlinks\n→ tokens deleted from DynamoDB\n→ Google token revoked via OAuth revoke API
+
+    TokenRefreshed --> NotLinked : Refresh token expired (180 days)\nor user unlinks
+      </div>
+    </div>
+
+    <table style="margin-top:16px">
+      <tr><th>Token</th><th>TTL</th><th>Where stored</th><th>Who uses it</th></tr>
+      <tr><td>Auth Code</td><td>15 minutes</td><td><code>google_home_auth_codes</code></td><td>Google Cloud — one-time use</td></tr>
+      <tr><td>Access Token</td><td>1 hour</td><td><code>google_home_tokens</code></td><td>Google sends it with every voice command</td></tr>
+      <tr><td>Refresh Token</td><td>180 days</td><td><code>google_home_tokens</code></td><td>Google refreshes access token automatically</td></tr>
+    </table>
+  </div>
+
+  <!-- ── 7. The Backoff ───────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">🚧</span> The Backoff — What Happened &amp; Why</div>
+    <div class="section-subtitle">Why Google stopped calling our /token endpoint and what we observed in CloudWatch.</div>
+
+    <div class="callout danger">
+      <span class="callout-icon">🔴</span>
+      <div class="callout-body">
+        <div class="callout-title">Root Cause</div>
+        <p>On Sept 18th at 12:42 UTC, an incorrect <code>client_secret</code> was temporarily set in the Google Home Developer Console. When Google called our <code>/token</code> Lambda, the secret didn't match what was in Secrets Manager → we returned <code>{"error": "invalid_client"}</code>. After multiple such errors, Google applied a <strong>project-level backoff of 24–72 hours</strong>.</p>
+      </div>
+    </div>
+
+    <div class="diagram-wrap">
+      <div class="diagram-label">What CloudWatch Shows During Backoff vs Normal</div>
+      <div class="mermaid">
+sequenceDiagram
+    participant GC as 🌐 Google Cloud
+    participant AU as ⚡ /authorize Lambda
+    participant TK as ⚡ /token Lambda
+    participant APP as 📱 Digilux App
+
+    rect rgb(230, 249, 240)
+        Note over GC,APP: ✅ NORMAL OPERATION
+        APP->>AU: Link Google Home → auth code issued
+        GC->>TK: POST /token (authorization_code)
+        TK-->>GC: 200 access_token + refresh_token
+        APP->>AU: GET /status → linked=true ✅
+    end
+
+    rect rgb(254, 240, 240)
+        Note over GC,APP: 🔴 DURING BACKOFF (current state)
+        APP->>AU: Link Google Home → auth code issued ✅
+        Note over GC,TK: Google does NOT call /token at all
+        APP->>AU: GET /status every 2s → linked=false ❌
+        Note over APP: Flutter polls for 10 min then times out
+    end
+      </div>
+    </div>
+
+    <div class="timeline" style="margin-top:28px">
+      <div class="tl-item">
+        <div class="tl-dot red">🔴</div>
+        <div class="tl-body">
+          <div class="tl-time">Sept 18 — 12:42 UTC</div>
+          <div class="tl-title">Wrong client_secret entered in Google Console</div>
+          <div class="tl-desc">Google called <code>/token</code>, got <code>invalid_client</code> repeatedly. Backoff triggered.</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot orange">🔧</div>
+        <div class="tl-body">
+          <div class="tl-time">Sept 18 — 13:00 UTC</div>
+          <div class="tl-title">Secret corrected in Google Console</div>
+          <div class="tl-desc">Secrets Manager value and Google Console now match exactly. But backoff already triggered — can't be cleared manually.</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot blue">🔍</div>
+        <div class="tl-body">
+          <div class="tl-time">Sept 19–20</div>
+          <div class="tl-title">Multiple test attempts — App Flip confirmed working</div>
+          <div class="tl-desc">Every attempt: App Flip fires, auth code issued correctly, Flutter polls status. Token Lambda = zero invocations. Backoff still active.</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot orange">⏳</div>
+        <div class="tl-body">
+          <div class="tl-time">Sept 20 — 15:19 UTC</div>
+          <div class="tl-title">Google called /token with a refresh_token (partial backoff lift)</div>
+          <div class="tl-desc">Google's background token refresh called us — returned <code>invalid_grant</code> (old stale token not in DB). This is not <code>invalid_client</code> so should not reset the backoff timer.</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot green">✅</div>
+        <div class="tl-body">
+          <div class="tl-time">Expected: Sept 21 onwards</div>
+          <div class="tl-title">Backoff should clear — retry on real Android device</div>
+          <div class="tl-desc">With a real device (proper GMS), trigger a fresh link. Watch CloudWatch for <code>TOKENS_STORED</code> in <code>google_home_oauth_token</code> Lambda — that's the success signal.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 8. CloudWatch Evidence ───────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">📊</span> CloudWatch Evidence — What We See in Logs</div>
+    <div class="section-subtitle">Real log lines from our Lambda functions during testing today.</div>
+
+    <h3 style="font-size:15px; color:#0f3460; margin-bottom:12px;">App Flip working — /authorize Lambda (Sept 20, 15:44 UTC)</h3>
+    <div class="payload-box">
+      <div class="payload-box-header response">✅ /authorize — App Flip success</div>
+      <pre>CONFIG_OK function=google_home_oauth_authorize region=ap-south-1
+REQUEST_START method=POST
+APP_FLIP_START
+COGNITO_CLIENT_READY region=ap-south-1
+APP_FLIP_TOKEN_VALID_GET_USER  sub=f123dd2a-7061-7004-d4f2-573c0585ad6b
+APP_FLIP_PARAMS userId=f123dd2a... client_id=75gmuum6... redirect_uri=https://oauth-redirect.googleusercontent.com/r/digilux-ai-pro
+AUTH_CODE_STORED  userId=f123dd2a...  code=ZMoYqpKc...  ttl=900
+[AUDIT] GH_APP_FLIP_CODE_ISSUED  userId=f123dd2a...  code_prefix=ZMoYqpKc  redirect_uri=...
+APP_FLIP_OK  userId=f123dd2a...  code_prefix=ZMoYqpKc</pre>
+    </div>
+
+    <h3 style="font-size:15px; color:#0f3460; margin: 20px 0 12px;">Status polling — Flutter app waiting (every 2 seconds)</h3>
+    <div class="payload-box">
+      <div class="payload-box-header error">⏳ /status — Not linked (backoff blocking token exchange)</div>
+      <pre>15:44:29  REQUEST_START  method=GET  source_ip=49.37.182.180
+15:44:29  AUTH_OK  userId=f123dd2a...
+15:44:30  STATUS_NOT_LINKED  userId=f123dd2a...
+15:44:30  [AUDIT] GH_STATUS_CHECK  linked=False  agent_id=digilux-ai-pro
+
+<span class="cmt">// Same response repeats every 2 seconds for up to 10 minutes</span>
+<span class="cmt">// Flutter app polls until linked=True or timeout</span></pre>
+    </div>
+
+    <h3 style="font-size:15px; color:#0f3460; margin: 20px 0 12px;">What success looks like (expected after backoff clears)</h3>
+    <div class="payload-box">
+      <div class="payload-box-header response">✅ /token — Token exchange success (what we expect to see)</div>
+      <pre>REQUEST_START  function=google_home_oauth_token
+TOKEN_REQUEST  grant_type=authorization_code
+GH_CREDENTIALS_LOADED  client_id_prefix=75gmuum6
+AUTH_CODE_VALID  userId=f123dd2a...  code_prefix=ZMoYqpKc
+TOKENS_STORED  userId=f123dd2a...  access_token_prefix=at_...  refresh_token_prefix=rt_...
+[AUDIT] GH_TOKEN_ISSUED  userId=f123dd2a...  agent_id=digilux-ai-pro
+REQUEST_OK  statusCode=200</pre>
+    </div>
+  </div>
+
+  <!-- ── 9. Next Steps ─────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title"><span class="icon">🚀</span> Next Steps</div>
+    <div class="section-subtitle">What needs to happen before GH integration is QA-ready and production-ready.</div>
+
+    <table>
+      <tr><th>#</th><th>Action</th><th>Owner</th><th>Status</th></tr>
+      <tr>
+        <td>1</td>
+        <td>Wait for Google backoff to clear, then retry on a real Android device with GMS. Watch CloudWatch for <code>TOKENS_STORED</code>.</td>
+        <td>Dev team</td>
+        <td><span class="pill pill-orange">In Progress</span></td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>Implement <code>EXECUTE</code> intent in <code>google_home_fulfillment</code> Lambda — wire it to the Digilux device control API so voice commands physically control devices.</td>
+        <td>Dev team</td>
+        <td><span class="pill pill-red">Pending</span></td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>Commit Flutter changes: <code>googleHomeEnabled=true</code> in <code>voice_integration_constants.dart</code> to enable the GH screen for users.</td>
+        <td>Dev team</td>
+        <td><span class="pill pill-orange">Pending commit</span></td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>QA sign-off on end-to-end flow: Link → voice command SYNC → QUERY → EXECUTE → Unlink on a real device.</td>
+        <td>QA / Nitin</td>
+        <td><span class="pill pill-red">Blocked on #1 &amp; #2</span></td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>Run <code>deploy.sh</code> for Honeywell AWS prod account. Fill all <code>FILL_IN</code> values in <code>env.honeywell.prod.json</code>. Follow <code>google_console_checklist.md</code> for Google Console setup.</td>
+        <td>Honeywell team</td>
+        <td><span class="pill pill-blue">Handover ready</span></td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td>Submit Google Home action for certification review once QA is signed off.</td>
+        <td>Dev / SA</td>
+        <td><span class="pill pill-red">Pending QA</span></td>
+      </tr>
+    </table>
+
+    <div class="callout ok" style="margin-top:24px">
+      <span class="callout-icon">✅</span>
+      <div class="callout-body">
+        <div class="callout-title">What Honeywell Needs to Deploy</div>
+        <p>The GitHub repo contains <code>deploy/deploy.sh</code> + <code>deploy/env.honeywell.prod.json</code> (template) + <code>deploy/DEPLOY_GUIDE.md</code> + <code>deploy/google_console_checklist.md</code>. Honeywell fills the template with their AWS/Cognito/Alexa/Google values and runs a single command. No manual AWS console steps required.</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">
+  Google Home Integration Technical Brief &nbsp;·&nbsp; Digilux QA &nbsp;·&nbsp; September 2026 &nbsp;·&nbsp; Confidential
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#0f3460',
+      primaryTextColor: '#ffffff',
+      primaryBorderColor: '#0f3460',
+      lineColor: '#888',
+      secondaryColor: '#e8f0fe',
+      tertiaryColor: '#f0f2f5',
+      background: '#ffffff',
+      mainBkg: '#0f3460',
+      nodeBorder: '#0f3460',
+      clusterBkg: '#fafbff',
+      titleColor: '#1a1a2e',
+      edgeLabelBackground: '#ffffff',
+      attributeBackgroundColorEven: '#f5f7ff',
+      attributeBackgroundColorOdd: '#ffffff'
+    },
+    sequence: {
+      actorMargin: 60,
+      width: 160,
+      height: 50,
+      boxMargin: 12,
+      mirrorActors: false,
+      useMaxWidth: true
+    },
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' }
+  });
+</script>
+</body>
+</html>
