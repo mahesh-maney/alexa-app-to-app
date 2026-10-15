@@ -232,44 +232,64 @@ def lambda_handler(event, context):  # noqa: ANN001
     state         = params.get("state",         "").strip()
     scope         = params.get("scope",         "profile").strip()
 
+    logger.debug(
+        "AUTHORIZE_RAW_PARAMS all_keys=%s request_id=%s",
+        list(params.keys()), request_id,
+    )
     logger.info(
         "AUTHORIZE_GET client_id=%s redirect_uri=%s response_type=%s "
-        "state_present=%s request_id=%s",
-        client_id, redirect_uri, response_type, bool(state), request_id,
+        "state_present=%s scope=%s request_id=%s",
+        client_id, redirect_uri, response_type, bool(state), scope, request_id,
     )
 
     # ── Step 4: Validate params ────────────────────────────────────────────────
 
     # client_id must match — error page (not redirect) since redirect_uri may also be invalid
     if not _validate_client_id(client_id):
-        logger.warning("INVALID_CLIENT_ID client_id=%s request_id=%s", client_id, request_id)
+        logger.warning("INVALID_CLIENT_ID client_id=%s expected=%s request_id=%s",
+                       client_id, _GH_CLIENT_ID, request_id)
         _audit("GH_AUTHORIZE_INVALID_CLIENT", client_id=client_id, request_id=request_id)
         return _html_resp(400, _error_page(
             "Invalid client ID. This account linking request cannot be completed."
         ))
+    logger.debug("VALIDATION_PASS step=client_id client_id=%s request_id=%s",
+                 client_id, request_id)
 
     # redirect_uri must be valid before we can use it for error redirects
     if not _validate_redirect_uri(redirect_uri):
         logger.warning(
-            "INVALID_REDIRECT_URI redirect_uri=%s request_id=%s", redirect_uri, request_id
+            "INVALID_REDIRECT_URI redirect_uri=%s allowed=%s request_id=%s",
+            redirect_uri, list(_ALLOWED_REDIRECTS), request_id
         )
         _audit("GH_AUTHORIZE_INVALID_REDIRECT", redirect_uri=redirect_uri, request_id=request_id)
         return _html_resp(400, _error_page(
             "Invalid redirect URI. This account linking request cannot be completed."
         ))
+    logger.debug("VALIDATION_PASS step=redirect_uri redirect_uri=%s request_id=%s",
+                 redirect_uri, request_id)
 
     # From here redirect_uri is trusted — use it for error redirects
     if response_type != "code":
         logger.warning(
             "UNSUPPORTED_RESPONSE_TYPE response_type=%s request_id=%s", response_type, request_id
         )
+        _audit("GH_AUTHORIZE_BAD_RESPONSE_TYPE", response_type=response_type, request_id=request_id)
         return _redirect_error(redirect_uri, state, "unsupported_response_type")
+    logger.debug("VALIDATION_PASS step=response_type request_id=%s", request_id)
 
     if not state:
         logger.warning("MISSING_STATE request_id=%s", request_id)
+        _audit("GH_AUTHORIZE_MISSING_STATE", request_id=request_id)
         return _redirect_error(redirect_uri, state, "invalid_request")
+    logger.debug("VALIDATION_PASS step=state state=%s... request_id=%s",
+                 state[:8], request_id)
+
+    logger.info("ALL_PARAMS_VALID client_id=%s redirect_uri=%s scope=%s state=%s... request_id=%s",
+                client_id, redirect_uri, scope, state[:8], request_id)
 
     # ── Step 5: Store OAuth transaction in DynamoDB ────────────────────────────
+    logger.debug("STORING_TRANSACTION state=%s... ttl_seconds=%d redirect_uri=%s scope=%s request_id=%s",
+                 state[:8], _TRANSACTION_TTL_S, redirect_uri, scope, request_id)
     try:
         _store_transaction(state, client_id, redirect_uri, scope)
     except ClientError as exc:

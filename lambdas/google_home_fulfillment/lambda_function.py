@@ -141,6 +141,11 @@ def _resolve_user_id(access_token: str) -> str | None:
     Look up userId from our opaque access token using the accessToken-index GSI.
     Returns userId string on success, None if not found or expired.
     """
+    t0 = time.time()
+    logger.debug(
+        "TOKEN_LOOKUP_START token=%s... table=%s index=%s",
+        access_token[:8], _TOKENS_TABLE, _TOKENS_ACCESS_TOKEN_INDEX,
+    )
     try:
         resp = _ddb().Table(_TOKENS_TABLE).query(
             IndexName=_TOKENS_ACCESS_TOKEN_INDEX,
@@ -150,22 +155,37 @@ def _resolve_user_id(access_token: str) -> str | None:
         )
         items = resp.get("Items", [])
     except ClientError as exc:
-        logger.error("DDB_RESOLVE_TOKEN_ERROR error=%s", exc)
+        logger.error("DDB_RESOLVE_TOKEN_ERROR token=%s... error=%s elapsed_ms=%.0f",
+                     access_token[:8], exc, (time.time() - t0) * 1000)
         return None
 
+    elapsed_ms = (time.time() - t0) * 1000
+    logger.debug("TOKEN_LOOKUP_DONE token=%s... items_found=%d elapsed_ms=%.0f",
+                 access_token[:8], len(items), elapsed_ms)
+
     if not items:
-        logger.warning("TOKEN_NOT_FOUND access_token=%s...", access_token[:8])
+        logger.warning("TOKEN_NOT_FOUND access_token=%s... elapsed_ms=%.0f",
+                       access_token[:8], elapsed_ms)
         return None
 
     record = items[0]
+    now = int(time.time())
     expires_at = int(record.get("expiresAt", 0))
-    if expires_at and expires_at < int(time.time()):
-        logger.warning("ACCESS_TOKEN_EXPIRED userId=%s expires_at=%d",
-                       record.get("userId"), expires_at)
+    ttl_remaining = expires_at - now if expires_at else -1
+    logger.debug(
+        "TOKEN_RECORD_FOUND userId=%s expires_at=%d ttl_remaining=%ds token=%s...",
+        record.get("userId"), expires_at, ttl_remaining, access_token[:8],
+    )
+    if expires_at and expires_at < now:
+        logger.warning(
+            "ACCESS_TOKEN_EXPIRED userId=%s expires_at=%d expired_ago=%ds token=%s...",
+            record.get("userId"), expires_at, now - expires_at, access_token[:8],
+        )
         return None
 
     user_id = record.get("userId", "")
-    logger.debug("TOKEN_RESOLVED userId=%s", user_id)
+    logger.info("TOKEN_RESOLVED userId=%s ttl_remaining=%ds elapsed_ms=%.0f",
+                user_id, ttl_remaining, elapsed_ms)
     return user_id or None
 
 
@@ -346,21 +366,35 @@ def _build_device_endpoints_gh(user_id: str, site_id: str, site_name: str,
 
 def _get_all_gh_devices(user_id: str) -> list[dict]:
     """Return all device + scene objects for a user in Google Home format."""
+    t0 = time.time()
     devices: list[dict] = []
 
     udd_table = _ddb().Table(_USER_DEVICE_TABLE)
     sites = udd_table.query(KeyConditionExpression=Key("userId").eq(user_id)).get("Items", [])
     multi_site = len(sites) > 1
+    logger.debug("SYNC_SITES_LOADED userId=%s site_count=%d multi_site=%s",
+                 user_id, len(sites), multi_site)
 
     for site in sites:
         site_id   = site.get("siteId", "")
         site_name = site.get("siteName", "")
+        site_duids = [d.get("duid", "") for d in site.get("devices", []) if d.get("duid")]
+        logger.debug("SYNC_SITE_START userId=%s siteId=%s siteName=%s duid_count=%d duids=%s",
+                     user_id, site_id, site_name, len(site_duids), site_duids)
         zone_map  = _load_zone_map(user_id, site_id)
+        logger.debug("SYNC_ZONE_MAP_LOADED userId=%s siteId=%s zone_count=%d zones=%s",
+                     user_id, site_id, len(zone_map), list(zone_map.values()))
+        site_ep_count_before = len(devices)
         for device in site.get("devices", []):
             duid = device.get("duid", "")
             if duid:
-                devices.extend(_build_device_endpoints_gh(
-                    user_id, site_id, site_name, duid, zone_map, multi_site))
+                eps = _build_device_endpoints_gh(
+                    user_id, site_id, site_name, duid, zone_map, multi_site)
+                logger.debug("SYNC_DUID_ENDPOINTS duid=%s siteId=%s endpoint_count=%d",
+                             duid, site_id, len(eps))
+                devices.extend(eps)
+        logger.info("SYNC_SITE_DONE userId=%s siteId=%s siteName=%s endpoints_added=%d",
+                    user_id, site_id, site_name, len(devices) - site_ep_count_before)
 
     # Scenes — read from S3 per site
     seen_scene_ids: set = set()
@@ -371,9 +405,11 @@ def _get_all_gh_devices(user_id: str) -> list[dict]:
         if not site_id:
             continue
         s3_key = f"{user_id}/{site_id}/scenes/scene_data.json"
+        logger.debug("SYNC_SCENES_FETCH userId=%s siteId=%s s3_key=%s", user_id, site_id, s3_key)
         try:
             obj  = _s3_client().get_object(Bucket=_METADATA_BUCKET, Key=s3_key)
             data = json.loads(obj["Body"].read())
+            site_scenes_added = 0
             if isinstance(data, list):
                 for scene in data:
                     scene_id = scene.get("sceneId") or scene.get("id", "")
@@ -399,13 +435,21 @@ def _get_all_gh_devices(user_id: str) -> list[dict]:
                     }
                     devices.append(entry)
                     scene_count += 1
+                    site_scenes_added += 1
+            logger.debug("SYNC_SCENES_DONE userId=%s siteId=%s scenes_added=%d",
+                         user_id, site_id, site_scenes_added)
         except Exception as exc:
             code = getattr(getattr(exc, "response", {}), "get", lambda *a: "")(
                 "Error", {}).get("Code", "")
             if code != "NoSuchKey":
                 logger.warning("Scene load failed userId=%s siteId=%s: %s", user_id, site_id, exc)
+            else:
+                logger.debug("SYNC_NO_SCENES userId=%s siteId=%s (no scene_data.json)",
+                             user_id, site_id)
 
-    logger.info("SYNC scenes=%d total_devices=%d userId=%s", scene_count, len(devices), user_id)
+    elapsed_ms = (time.time() - t0) * 1000
+    logger.info("SYNC_COMPLETE scenes=%d total_devices=%d userId=%s elapsed_ms=%.0f",
+                scene_count, len(devices), user_id, elapsed_ms)
     return devices
 
 
@@ -697,28 +741,41 @@ def _execute_command_group(user_id: str, device_ids: list[str], cmd: str,
     for device_id in device_ids:
         if scene_id := _parse_scene_endpoint_id(device_id):
             if cmd == "action.devices.commands.OnOff" and params.get("on", False):
+                logger.info("EXECUTE_SCENE_ACTIVATE sceneId=%s userId=%s cmd=%s",
+                            scene_id, user_id, cmd)
                 _activate_scene(user_id, scene_id)
-                logger.info("Scene activated: sceneId=%s userId=%s", scene_id, user_id)
+                logger.info("EXECUTE_SCENE_OK sceneId=%s userId=%s", scene_id, user_id)
+                _audit("GH_SCENE_ACTIVATE", userId=user_id, sceneId=scene_id)
+            else:
+                logger.debug("EXECUTE_SCENE_SKIP sceneId=%s cmd=%s on=%s (only OnOff+on activates)",
+                             scene_id, cmd, params.get("on"))
             success_ids.append(device_id)
             continue
 
         try:
             duid, mac, epid, eptype = _decrypt_endpoint(device_id)
-        except Exception:
+            logger.debug("EXECUTE_DECRYPT_OK duid=%s mac=%s epid=%d eptype=%d", duid, mac, epid, eptype)
+        except Exception as exc:
+            logger.warning("EXECUTE_DECRYPT_FAILED device_id=%s... error=%s", device_id[:16], exc)
             error_ids.append(device_id)
             continue
 
         try:
             state = _build_iot_state(cmd, params, eptype, duid, mac, epid)
+            logger.debug("EXECUTE_IOT_STATE duid=%s epid=%d cmd=%s iot_state=%s",
+                         duid, epid, cmd, state)
         except ValueError as exc:
-            logger.warning("Unsupported command %s for device %s: %s", cmd, device_id, exc)
+            logger.warning("EXECUTE_UNSUPPORTED_CMD cmd=%s duid=%s device_id=%s... error=%s",
+                           cmd, duid, device_id[:16], exc)
             error_ids.append(device_id)
             continue
 
         _publish_device_command(duid, mac, epid, eptype, state, user_id)
         _update_device_state_db(duid, mac, epid, state)
         success_ids.append(device_id)
-        logger.info("Execute %s device=%s state=%s", cmd, device_id, state)
+        logger.info("EXECUTE_DEVICE_OK cmd=%s duid=%s mac=%s epid=%d state=%s",
+                    cmd, duid, mac, epid, state)
+        _audit("GH_DEVICE_CMD", userId=user_id, cmd=cmd, duid=duid, epid=epid)
 
     final_state = _build_gh_return_state(cmd, params)
 
@@ -739,9 +796,14 @@ def _execute_command_group(user_id: str, device_ids: list[str], cmd: str,
 # ── Intent handlers ────────────────────────────────────────────────────────────
 
 def _handle_sync(payload: dict, user_id: str, request_id: str) -> dict:
-    logger.info("INTENT_SYNC userId=%s request_id=%s", user_id, request_id)
+    t0 = time.time()
+    logger.info("INTENT_SYNC_START userId=%s request_id=%s", user_id, request_id)
     devices = _get_all_gh_devices(user_id)
-    _audit("GH_SYNC", userId=user_id, device_count=len(devices), request_id=request_id)
+    elapsed_ms = (time.time() - t0) * 1000
+    logger.info("INTENT_SYNC_OK userId=%s device_count=%d elapsed_ms=%.0f request_id=%s",
+                user_id, len(devices), elapsed_ms, request_id)
+    _audit("GH_SYNC", userId=user_id, device_count=len(devices),
+           elapsed_ms=int(elapsed_ms), request_id=request_id)
     return {
         "requestId": request_id,
         "payload": {
@@ -752,23 +814,32 @@ def _handle_sync(payload: dict, user_id: str, request_id: str) -> dict:
 
 
 def _handle_query(payload: dict, user_id: str, request_id: str) -> dict:
-    logger.info("INTENT_QUERY userId=%s request_id=%s", user_id, request_id)
+    t0 = time.time()
+    queried_devices = payload.get("devices", [])
+    logger.info("INTENT_QUERY_START userId=%s device_count=%d request_id=%s",
+                user_id, len(queried_devices), request_id)
+    logger.debug("QUERY_DEVICE_IDS userId=%s ids=%s request_id=%s",
+                 user_id, [d.get("id", "")[:16] for d in queried_devices], request_id)
     device_states: dict = {}
 
-    for device in payload.get("devices", []):
+    for device in queried_devices:
         device_id = device.get("id", "")
 
         if _parse_scene_endpoint_id(device_id):
             device_states[device_id] = {"online": True, "status": "SUCCESS", "on": False}
+            logger.debug("QUERY_SCENE device_id=%s... online=True on=False", device_id[:16])
             continue
 
         try:
             duid, mac, epid, ep_type = _decrypt_endpoint(device_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning("QUERY_DECRYPT_FAILED device_id=%s... error=%s", device_id[:16], exc)
             device_states[device_id] = {"online": False, "status": "ERROR", "errorCode": "deviceNotFound"}
             continue
 
+        logger.debug("QUERY_DEVICE duid=%s mac=%s epid=%d ep_type=%d", duid, mac, epid, ep_type)
         state = _get_current_state(duid, mac, epid)
+        logger.debug("QUERY_RAW_STATE duid=%s epid=%d state=%s", duid, epid, state)
         level = int(state.get("level") or 0)
         on_off_raw = state.get("onOff")
         on_off = bool(on_off_raw if on_off_raw is not None else (level > 0))
@@ -802,8 +873,13 @@ def _handle_query(payload: dict, user_id: str, request_id: str) -> dict:
                 gh_state["currentFanSpeedSetting"] = _level_to_fan_speed(level)
 
         device_states[device_id] = gh_state
+        logger.debug("QUERY_GH_STATE duid=%s epid=%d gh_state=%s", duid, epid, gh_state)
 
-    _audit("GH_QUERY", userId=user_id, device_count=len(device_states), request_id=request_id)
+    elapsed_ms = (time.time() - t0) * 1000
+    logger.info("INTENT_QUERY_OK userId=%s queried=%d responded=%d elapsed_ms=%.0f request_id=%s",
+                user_id, len(queried_devices), len(device_states), elapsed_ms, request_id)
+    _audit("GH_QUERY", userId=user_id, device_count=len(device_states),
+           elapsed_ms=int(elapsed_ms), request_id=request_id)
     return {
         "requestId": request_id,
         "payload": {"devices": device_states},
@@ -811,17 +887,38 @@ def _handle_query(payload: dict, user_id: str, request_id: str) -> dict:
 
 
 def _handle_execute(payload: dict, user_id: str, request_id: str) -> dict:
-    logger.info("INTENT_EXECUTE userId=%s request_id=%s", user_id, request_id)
+    t0 = time.time()
+    command_groups = payload.get("commands", [])
+    total_targets = sum(len(cg.get("devices", [])) for cg in command_groups)
+    logger.info("INTENT_EXECUTE_START userId=%s command_groups=%d total_targets=%d request_id=%s",
+                user_id, len(command_groups), total_targets, request_id)
     results: list[dict] = []
 
-    for command_group in payload.get("commands", []):
+    for gi, command_group in enumerate(command_groups):
         target_ids = [d["id"] for d in command_group.get("devices", [])]
-        for execution in command_group.get("execution", []):
+        executions = command_group.get("execution", [])
+        logger.debug("EXECUTE_GROUP group=%d target_count=%d execution_count=%d targets=%s",
+                     gi, len(target_ids), len(executions),
+                     [tid[:16] for tid in target_ids])
+        for ei, execution in enumerate(executions):
             cmd    = execution.get("command", "")
             params = execution.get("params", {})
+            logger.info("EXECUTE_CMD group=%d exec=%d command=%s params=%s target_count=%d userId=%s",
+                        gi, ei, cmd, params, len(target_ids), user_id)
+            _audit("GH_EXECUTE_CMD", userId=user_id, command=cmd, target_count=len(target_ids),
+                   request_id=request_id)
             _execute_command_group(user_id, target_ids, cmd, params, results)
 
-    _audit("GH_EXECUTE", userId=user_id, result_count=len(results), request_id=request_id)
+    elapsed_ms = (time.time() - t0) * 1000
+    success_count = sum(1 for r in results if r.get("status") == "SUCCESS")
+    error_count   = sum(1 for r in results if r.get("status") == "ERROR")
+    logger.info(
+        "INTENT_EXECUTE_OK userId=%s result_groups=%d success=%d error=%d elapsed_ms=%.0f request_id=%s",
+        user_id, len(results), success_count, error_count, elapsed_ms, request_id,
+    )
+    _audit("GH_EXECUTE", userId=user_id, result_count=len(results),
+           success=success_count, errors=error_count,
+           elapsed_ms=int(elapsed_ms), request_id=request_id)
     return {
         "requestId": request_id,
         "payload": {"commands": results},
@@ -878,6 +975,8 @@ def lambda_handler(event, context):  # noqa: ANN001
         return _resp(401, {"error": "Unauthorized"})
 
     access_token = auth.split(" ", 1)[1].strip()
+    logger.debug("BEARER_TOKEN_RECEIVED token=%s... source_ip=%s request_id=%s",
+                 access_token[:8], source_ip, request_id)
     user_id = _resolve_user_id(access_token)
     if not user_id:
         logger.warning(
@@ -900,8 +999,13 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     google_request_id = body.get("requestId", request_id)
     inputs = body.get("inputs", [])
+    logger.debug(
+        "REQUEST_BODY_PARSED google_request_id=%s input_count=%d userId=%s request_id=%s",
+        google_request_id, len(inputs), user_id, request_id,
+    )
     if not inputs:
         logger.warning("NO_INPUTS_IN_REQUEST userId=%s request_id=%s", user_id, request_id)
+        _audit("GH_FULFILLMENT_NO_INPUTS", userId=user_id, request_id=request_id)
         return _resp(400, {"error": "No inputs in request"})
 
     # ── 3. Dispatch intent ─────────────────────────────────────────────────────
@@ -909,14 +1013,21 @@ def lambda_handler(event, context):  # noqa: ANN001
     intent      = first_input.get("intent", "")
     payload_in  = first_input.get("payload", {})
 
-    logger.info("INTENT=%s userId=%s google_request_id=%s", intent, user_id, google_request_id)
+    logger.info("INTENT_DISPATCH intent=%s userId=%s google_request_id=%s request_id=%s",
+                intent, user_id, google_request_id, request_id)
+    _audit("GH_FULFILLMENT_INTENT", intent=intent, userId=user_id,
+           google_request_id=google_request_id, request_id=request_id)
 
     handler = _INTENT_HANDLERS.get(intent)
     if not handler:
-        logger.warning("UNKNOWN_INTENT intent=%s userId=%s request_id=%s",
-                       intent, user_id, request_id)
+        logger.warning("UNKNOWN_INTENT intent=%s userId=%s known_intents=%s request_id=%s",
+                       intent, user_id, list(_INTENT_HANDLERS.keys()), request_id)
+        _audit("GH_FULFILLMENT_UNKNOWN_INTENT", intent=intent, userId=user_id,
+               request_id=request_id)
         return _resp(400, {"error": f"Unknown intent: {intent}"})
 
+    logger.debug("INTENT_HANDLER_FOUND intent=%s handler=%s", intent, handler.__name__)
+    t_handler = time.time()
     try:
         result = handler(payload_in, user_id, google_request_id)
     except Exception as exc:
@@ -926,8 +1037,13 @@ def lambda_handler(event, context):  # noqa: ANN001
                error=str(exc), request_id=google_request_id)
         return _resp(500, {"error": "Internal server error"})
 
-    logger.info("REQUEST_OK function=google_home_fulfillment intent=%s userId=%s",
-                intent, user_id)
+    handler_ms = (time.time() - t_handler) * 1000
+    logger.debug("INTENT_HANDLER_COMPLETE intent=%s elapsed_ms=%.0f request_id=%s",
+                 intent, handler_ms, google_request_id)
+    logger.info("REQUEST_OK function=google_home_fulfillment intent=%s userId=%s elapsed_ms=%.0f",
+                intent, user_id, handler_ms)
+    _audit("GH_FULFILLMENT_OK", intent=intent, userId=user_id,
+           elapsed_ms=int(handler_ms), request_id=google_request_id)
     return _resp(200, result)
 
 

@@ -487,16 +487,32 @@ def _handle_cognito_callback(event: dict, request_id: str) -> dict:
     cognito_code = params.get("code",  "").strip()
     state        = params.get("state", "").strip()
 
-    logger.info(
-        "COGNITO_CALLBACK code_present=%s state=%s... request_id=%s",
-        bool(cognito_code), state[:8] if state else "", request_id,
+    error_param = params.get("error", "")
+    error_desc  = params.get("error_description", "")
+
+    logger.debug(
+        "COGNITO_CALLBACK_RAW_PARAMS keys=%s error=%s error_description=%s request_id=%s",
+        list(params.keys()), error_param or "none", error_desc or "none", request_id,
     )
+    logger.info(
+        "COGNITO_CALLBACK code_present=%s state=%s... error=%s request_id=%s",
+        bool(cognito_code), state[:8] if state else "", error_param or "none", request_id,
+    )
+
+    if error_param:
+        logger.warning(
+            "COGNITO_RETURNED_ERROR error=%s error_description=%s state=%s... request_id=%s",
+            error_param, error_desc, state[:8] if state else "", request_id,
+        )
+        _audit("GH_CALLBACK_COGNITO_ERROR", error=error_param,
+               state_prefix=state[:8] if state else "", request_id=request_id)
 
     # Retrieve the stored OAuth transaction using Google's state
     if not state:
         logger.warning("COGNITO_CALLBACK_MISSING_STATE request_id=%s", request_id)
         return _html_resp(400, _error_page("Missing state parameter. Please try linking again."))
 
+    logger.debug("LOOKING_UP_TRANSACTION state=%s... request_id=%s", state[:8], request_id)
     transaction = _get_transaction(state)
     if not transaction:
         logger.warning(
@@ -509,6 +525,11 @@ def _handle_cognito_callback(event: dict, request_id: str) -> dict:
 
     redirect_uri = transaction.get("redirect_uri", "")
     scope        = transaction.get("scope", "profile")
+
+    logger.debug(
+        "TRANSACTION_LOADED state=%s... redirect_uri=%s scope=%s created_at=%s request_id=%s",
+        state[:8], redirect_uri, scope, transaction.get("created_at", "?"), request_id,
+    )
 
     if not cognito_code:
         logger.warning(
@@ -540,6 +561,11 @@ def _handle_cognito_callback(event: dict, request_id: str) -> dict:
         claims   = _decode_id_token(id_token)
         user_id  = claims.get("sub", "")
         email    = claims.get("email", "")
+        logger.debug(
+            "ID_TOKEN_CLAIMS sub=%s email=%s iss=%s... exp=%s token_use=%s request_id=%s",
+            user_id, email, str(claims.get("iss", ""))[:40],
+            claims.get("exp", "?"), claims.get("token_use", "?"), request_id,
+        )
     except Exception as exc:
         logger.error(
             "ID_TOKEN_DECODE_FAILED error=%s state=%s... request_id=%s",
@@ -574,9 +600,11 @@ def _handle_cognito_callback(event: dict, request_id: str) -> dict:
 
     # ── Step 14: Display consent page ─────────────────────────────────────────
     logger.info(
-        "DISPLAYING_CONSENT_PAGE userId=%s state=%s... request_id=%s",
-        user_id, state[:8], request_id,
+        "DISPLAYING_CONSENT_PAGE userId=%s email=%s scope=%s state=%s... request_id=%s",
+        user_id, email, scope, state[:8], request_id,
     )
+    _audit("GH_CONSENT_PAGE_SHOWN", userId=user_id, email=email,
+           state_prefix=state[:8], request_id=request_id)
     return _html_resp(200, _consent_page(state, email, scope))
 
 
@@ -597,6 +625,10 @@ def _handle_consent(event: dict, request_id: str) -> dict:
     action = params.get("action", "").strip()
     state  = params.get("state",  "").strip()
 
+    logger.debug(
+        "CONSENT_BODY_PARSED keys=%s action=%s state=%s... request_id=%s",
+        list(params.keys()), action, state[:8] if state else "", request_id,
+    )
     logger.info(
         "CONSENT_POST action=%s state=%s... request_id=%s",
         action, state[:8] if state else "", request_id,
@@ -619,6 +651,11 @@ def _handle_consent(event: dict, request_id: str) -> dict:
     redirect_uri = transaction.get("redirect_uri", "")
     user_id      = transaction.get("userId", "")
     scope        = transaction.get("scope", "profile")
+
+    logger.debug(
+        "CONSENT_TRANSACTION_LOADED state=%s... userId=%s redirect_uri=%s scope=%s request_id=%s",
+        state[:8], user_id or "MISSING", redirect_uri, scope, request_id,
+    )
 
     # ── User approves (steps 15–19) ───────────────────────────────────────────
     if action == "approve":
@@ -654,6 +691,10 @@ def _handle_consent(event: dict, request_id: str) -> dict:
         )
 
         # Step 18: redirect to Google's redirect_uri with code + state
+        logger.debug(
+            "REDIRECTING_TO_GOOGLE redirect_uri=%s code=%s... state=%s... request_id=%s",
+            redirect_uri, code[:8], state[:8], request_id,
+        )
         return _redirect_to_google(redirect_uri, state, code=code)
 
     # ── User cancels (steps 25–27) ────────────────────────────────────────────
