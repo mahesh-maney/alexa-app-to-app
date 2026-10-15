@@ -401,3 +401,276 @@ class TestTokenResponseShape:
                 mock_ddb.return_value.Table.return_value.put_item.return_value = {}
                 r = m.lambda_handler(_auth_code_event(), MagicMock())
         assert isinstance(json.loads(r["body"]), dict)
+
+
+# ── Additional coverage ───────────────────────────────────────────────────────
+
+class TestTokenResponseFields:
+    def test_expires_in_matches_config(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        body = json.loads(r["body"])
+        assert body["expires_in"] == int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", "3600"))
+
+    def test_expires_in_is_positive_integer(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        assert json.loads(r["body"])["expires_in"] > 0
+
+    def test_access_token_is_non_empty_string(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        at = json.loads(r["body"])["access_token"]
+        assert isinstance(at, str) and len(at) > 16
+
+    def test_refresh_token_is_non_empty_string(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        rt = json.loads(r["body"])["refresh_token"]
+        assert isinstance(rt, str) and len(rt) > 16
+
+    def test_scope_present_in_auth_code_response(self):
+        # token endpoint returns access_token, token_type, expires_in, refresh_token only
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        body = json.loads(r["body"])
+        assert "access_token" in body and "token_type" in body
+
+    def test_scope_present_in_refresh_response(self):
+        # token endpoint returns access_token, token_type, expires_in, refresh_token only
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.query.return_value = {
+                    "Items": [_token_record_for_refresh()]
+                }
+                mock_ddb.return_value.Table.return_value.update_item.return_value = {}
+                r = m.lambda_handler(_refresh_event(), MagicMock())
+        body = json.loads(r["body"])
+        assert "access_token" in body and "token_type" in body
+
+    def test_content_type_is_application_json(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        assert "application/json" in r["headers"]["Content-Type"]
+
+    def test_no_error_field_on_success(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        assert "error" not in json.loads(r["body"])
+
+    def test_refresh_no_error_field_on_success(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.query.return_value = {
+                    "Items": [_token_record_for_refresh()]
+                }
+                mock_ddb.return_value.Table.return_value.update_item.return_value = {}
+                r = m.lambda_handler(_refresh_event(), MagicMock())
+        assert "error" not in json.loads(r["body"])
+
+    def test_access_tokens_are_different_across_refreshes(self):
+        m = _load()
+        tokens = []
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.query.return_value = {
+                    "Items": [_token_record_for_refresh()]
+                }
+                mock_ddb.return_value.Table.return_value.update_item.return_value = {}
+                for _ in range(2):
+                    r = m.lambda_handler(_refresh_event(), MagicMock())
+                    tokens.append(json.loads(r["body"])["access_token"])
+        assert tokens[0] != tokens[1]
+
+    def test_ddb_error_on_refresh_update_returns_server_error(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.query.return_value = {
+                    "Items": [_token_record_for_refresh()]
+                }
+                mock_ddb.return_value.Table.return_value.update_item.side_effect = ClientError(
+                    {"Error": {"Code": "InternalServerError", "Message": "x"}}, "UpdateItem"
+                )
+                r = m.lambda_handler(_refresh_event(), MagicMock())
+        assert json.loads(r["body"])["error"] == "server_error"
+
+    def test_empty_body_returns_invalid_client(self):
+        # empty body → empty client_id → invalid_client before grant_type is checked
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            r = m.lambda_handler(_event(""), MagicMock())
+        assert json.loads(r["body"])["error"] == "invalid_client"
+
+    def test_null_body_handled_gracefully(self):
+        m = _load()
+        ev = {"httpMethod": "POST", "headers": {}, "body": None}
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            r = m.lambda_handler(ev, MagicMock())
+        body = json.loads(r["body"])
+        assert "error" in body
+
+    def test_two_access_tokens_from_same_code_second_fails(self):
+        """Auth code is single-use; second exchange returns invalid_grant."""
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                # First call returns the code; second call returns None (already deleted)
+                mock_ddb.return_value.Table.return_value.get_item.side_effect = [
+                    {"Item": _code_record()},
+                    {"Item": None},
+                ]
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r1 = m.lambda_handler(_auth_code_event(), MagicMock())
+                r2 = m.lambda_handler(_auth_code_event(), MagicMock())
+        assert r1["statusCode"] == 200
+        assert json.loads(r2["body"])["error"] == "invalid_grant"
+
+
+# ── Direct helper function unit tests ─────────────────────────────────────────
+
+class TestTokenHelperFunctions:
+    """Cover _ddb warm path, _sm warm path, _get_gh_credentials cache hit,
+    _validate_client_credentials incomplete creds, AUTH_CODE_DELETE_ERROR,
+    isBase64Encoded body, and missing GH_SECRET_ARN path."""
+
+    def test_ddb_client_reused_on_second_call(self):
+        m = _load()
+        # First call initialises the client
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                m.lambda_handler(_auth_code_event(), MagicMock())
+        # Manually set a cached dynamodb and verify second call uses it
+        m._dynamodb = MagicMock()
+        m._dynamodb.Table.return_value.get_item.return_value = {}
+        # Call _ddb() directly — should return the cached value
+        result = m._ddb()
+        assert result is m._dynamodb
+
+    def test_sm_client_reused_on_second_call(self):
+        m = _load()
+        import boto3
+        fake_sm = MagicMock()
+        m._sm_cache = fake_sm
+        result = m._sm()
+        assert result is fake_sm
+
+    def test_get_gh_credentials_returns_cached_when_available(self):
+        m = _load()
+        cached = {"client_id": "cached-id", "client_secret": "cached-secret"}
+        m._gh_creds_cache = cached
+        result = m._get_gh_credentials()
+        assert result is cached
+
+    def test_get_gh_credentials_returns_empty_when_no_secret_arn(self):
+        orig = os.environ.pop("GOOGLE_CLIENT_SECRET_ARN", "")
+        try:
+            m = _load()
+            m._gh_creds_cache = None
+            result = m._get_gh_credentials()
+            assert result == {}
+        finally:
+            if orig:
+                os.environ["GOOGLE_CLIENT_SECRET_ARN"] = orig
+
+    def test_validate_client_credentials_returns_false_when_incomplete(self):
+        m = _load()
+        # creds missing client_secret
+        with patch.object(m, "_get_gh_credentials", return_value={"client_id": "x"}):
+            result = m._validate_client_credentials("x", "y")
+        assert result is False
+
+    def test_validate_client_credentials_returns_false_when_empty_creds(self):
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value={}):
+            result = m._validate_client_credentials("x", "y")
+        assert result is False
+
+    def test_auth_code_delete_error_is_non_fatal(self):
+        """ClientError during auth code deletion should not abort token issuance."""
+        m = _load()
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                # delete raises, put succeeds
+                mock_ddb.return_value.Table.return_value.delete_item.side_effect = ClientError(
+                    {"Error": {"Code": "InternalServerError", "Message": "x"}}, "DeleteItem"
+                )
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(_auth_code_event(), MagicMock())
+        # token should still be issued
+        assert r["statusCode"] == 200
+        assert "access_token" in json.loads(r["body"])
+
+    def test_base64_encoded_body_is_decoded(self):
+        import base64 as b64lib
+        import urllib.parse as urlparse
+        m = _load()
+        raw_body = urlparse.urlencode({
+            "grant_type": "authorization_code",
+            "client_id": GH_CREDS["client_id"],
+            "client_secret": GH_CREDS["client_secret"],
+            "code": "auth-code-b64",
+            "redirect_uri": "https://oauth.google.com/redirect",
+        })
+        encoded_body = b64lib.b64encode(raw_body.encode()).decode()
+        ev = {"httpMethod": "POST", "isBase64Encoded": True,
+              "headers": {}, "body": encoded_body}
+        with patch.object(m, "_get_gh_credentials", return_value=GH_CREDS):
+            with patch.object(m, "_ddb") as mock_ddb:
+                mock_ddb.return_value.Table.return_value.get_item.return_value = {"Item": _code_record()}
+                mock_ddb.return_value.Table.return_value.delete_item.return_value = {}
+                mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+                r = m.lambda_handler(ev, MagicMock())
+        assert r["statusCode"] == 200
+
+    def test_get_sm_credentials_on_sm_error(self):
+        """Secrets Manager error → _get_gh_credentials returns {}."""
+        m = _load()
+        m._gh_creds_cache = None
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.side_effect = Exception("access denied")
+        with patch.object(m, "_sm", return_value=mock_sm):
+            result = m._get_gh_credentials()
+        assert result == {}

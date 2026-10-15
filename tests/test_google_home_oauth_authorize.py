@@ -1,19 +1,22 @@
-"""Unit tests for google_home_oauth_authorize Lambda.
+"""Unit tests for google_home_oauth_authorize Lambda — Cognito-redirect flow.
 
-GET/POST /google-home/oauth/authorize
+GET /google-home/oauth/authorize
+  Validates OAuth params → stores transaction in DDB → 302 to Cognito Hosted UI.
+
+The old App-Flip (POST) flow was removed; the lambda is now GET-only.
 """
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import sys
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
-# ── Module loader ──────────────────────────────────────────────────────────────
+from botocore.exceptions import ClientError
+
 _HERE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_MOD_NAME = "gh_auth_fn"
+_MOD_NAME = "gh_authorize_fn"
 _SPEC     = importlib.util.spec_from_file_location(
     _MOD_NAME,
     os.path.join(_HERE, "lambdas", "google_home_oauth_authorize", "lambda_function.py"),
@@ -28,532 +31,415 @@ def _load():
     return m
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-CLIENT_ID    = "test-google-client-id"   # matches conftest GOOGLE_CLIENT_ID
+CLIENT_ID    = "test-google-client-id"
 REDIRECT_URI = "https://oauth-redirect.googleusercontent.com/r/test-project"
-GOOGLE_STATE = "google-csrf-state-xyz"
-USER_ID      = "user-sub-auth-abc"
-PRE_AUTH     = "pre-auth-state-uuid-123"
+GOOGLE_STATE = "google-csrf-state-AbCxYz"
 
 
-def _get_event(
-    client_id=CLIENT_ID,
-    redirect_uri=REDIRECT_URI,
-    response_type="code",
-    state=GOOGLE_STATE,
-    scope="profile",
-    pre_auth_state="",
-):
+def _get_event(client_id=CLIENT_ID, redirect_uri=REDIRECT_URI,
+               response_type="code", state=GOOGLE_STATE, scope="profile"):
     return {
         "httpMethod": "GET",
         "path": "/google-home/oauth/authorize",
         "queryStringParameters": {
-            "client_id":      client_id,
-            "redirect_uri":   redirect_uri,
-            "response_type":  response_type,
-            "state":          state,
-            "scope":          scope,
-            "pre_auth_state": pre_auth_state,
+            "client_id":     client_id,
+            "redirect_uri":  redirect_uri,
+            "response_type": response_type,
+            "state":         state,
+            "scope":         scope,
         },
+        "requestContext": {"identity": {"sourceIp": "1.2.3.4"}},
     }
 
 
-def _post_event(
-    username="user@example.com",
-    password="secret",
-    client_id=CLIENT_ID,
-    redirect_uri=REDIRECT_URI,
-    state=GOOGLE_STATE,
-    scope="profile",
-    pre_auth_state="",
-):
-    import urllib.parse
-    body = urllib.parse.urlencode({
-        "username":       username,
-        "password":       password,
-        "client_id":      client_id,
-        "redirect_uri":   redirect_uri,
-        "state":          state,
-        "scope":          scope,
-        "pre_auth_state": pre_auth_state,
-    })
-    return {
-        "httpMethod": "POST",
-        "path": "/google-home/oauth/authorize",
-        "body": body,
-    }
+def _ctx():
+    c = MagicMock()
+    c.aws_request_id = "req-test-abc"
+    return c
 
 
-def _parse_redirect(r):
-    """Parse the Location header of a 302 response into (base_url, query_params)."""
-    location = r["headers"]["Location"]
-    parsed   = urlparse(location)
-    params   = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-    return location, params
+def _ddb_ok():
+    m = MagicMock()
+    m.return_value.Table.return_value.put_item.return_value = {}
+    return m
 
 
-# ── GET — client_id validation ────────────────────────────────────────────────
-class TestGetClientIdValidation:
+# ── Config errors ──────────────────────────────────────────────────────────────
+class TestConfigErrors:
+    def _missing(self, var: str):
+        orig = os.environ.pop(var, "")
+        try:
+            m = _load()
+            r = m.lambda_handler(_get_event(), _ctx())
+        finally:
+            if orig:
+                os.environ[var] = orig
+        return r
+
+    def test_missing_cognito_hosted_ui_domain_returns_500(self):
+        assert self._missing("COGNITO_HOSTED_UI_DOMAIN")["statusCode"] == 500
+
+    def test_missing_cognito_callback_uri_returns_500(self):
+        assert self._missing("COGNITO_CALLBACK_URI")["statusCode"] == 500
+
+    def test_missing_data_region_returns_500(self):
+        assert self._missing("DATA_REGION")["statusCode"] == 500
+
+    def test_missing_google_client_id_returns_500(self):
+        assert self._missing("GOOGLE_CLIENT_ID")["statusCode"] == 500
+
+    def test_missing_cognito_client_id_returns_500(self):
+        assert self._missing("COGNITO_CLIENT_ID")["statusCode"] == 500
+
+    def test_500_body_is_html(self):
+        r = self._missing("COGNITO_HOSTED_UI_DOMAIN")
+        assert "text/html" in r["headers"]["Content-Type"]
+        assert "<html" in r["body"]
+
+
+# ── Method routing ─────────────────────────────────────────────────────────────
+class TestMethodRouting:
+    def test_post_returns_405(self):
+        m = _load()
+        ev = {**_get_event(), "httpMethod": "POST"}
+        with patch.object(m, "_ddb", _ddb_ok()):
+            assert m.lambda_handler(ev, _ctx())["statusCode"] == 405
+
+    def test_put_returns_405(self):
+        m = _load()
+        ev = {**_get_event(), "httpMethod": "PUT"}
+        with patch.object(m, "_ddb", _ddb_ok()):
+            assert m.lambda_handler(ev, _ctx())["statusCode"] == 405
+
+    def test_delete_returns_405(self):
+        m = _load()
+        ev = {**_get_event(), "httpMethod": "DELETE"}
+        with patch.object(m, "_ddb", _ddb_ok()):
+            assert m.lambda_handler(ev, _ctx())["statusCode"] == 405
+
+    def test_patch_returns_405(self):
+        m = _load()
+        ev = {**_get_event(), "httpMethod": "PATCH"}
+        with patch.object(m, "_ddb", _ddb_ok()):
+            assert m.lambda_handler(ev, _ctx())["statusCode"] == 405
+
+    def test_get_returns_302(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            assert m.lambda_handler(_get_event(), _ctx())["statusCode"] == 302
+
+    def test_405_body_is_html(self):
+        m = _load()
+        ev = {**_get_event(), "httpMethod": "PATCH"}
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(ev, _ctx())
+        assert "text/html" in r["headers"]["Content-Type"]
+
+
+# ── client_id validation ───────────────────────────────────────────────────────
+class TestClientIdValidation:
     def test_wrong_client_id_returns_400_html(self):
         m = _load()
-        r = m.lambda_handler(_get_event(client_id="wrong-client"), MagicMock())
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(client_id="wrong-client"), _ctx())
         assert r["statusCode"] == 400
         assert "text/html" in r["headers"]["Content-Type"]
 
-    def test_correct_client_id_passes(self):
+    def test_wrong_client_id_does_not_store_transaction(self):
         m = _load()
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(_get_event(client_id=CLIENT_ID), MagicMock())
-        # Falls through to login form (200) since no pre_auth_state
-        assert r["statusCode"] == 200
+        with patch.object(m, "_ddb") as mock_ddb:
+            m.lambda_handler(_get_event(client_id="wrong-client"), _ctx())
+        mock_ddb.return_value.Table.return_value.put_item.assert_not_called()
 
-    def test_empty_client_id_when_not_configured_passes(self):
-        """If GOOGLE_CLIENT_ID env var is blank, all client_ids pass validation."""
-        original = os.environ.get("GOOGLE_CLIENT_ID")
-        os.environ["GOOGLE_CLIENT_ID"] = ""
+    def test_wrong_client_id_body_mentions_invalid(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(client_id="bad"), _ctx())
+        assert "invalid" in r["body"].lower() or "client" in r["body"].lower()
+
+    def test_correct_client_id_proceeds_to_302(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            assert m.lambda_handler(_get_event(), _ctx())["statusCode"] == 302
+
+    def test_unconfigured_google_client_id_accepts_any(self):
+        orig = os.environ.pop("GOOGLE_CLIENT_ID", "")
         try:
             m = _load()
-            with patch.object(m, "_get_session_user", return_value=None):
-                r = m.lambda_handler(_get_event(client_id="anything"), MagicMock())
+            with patch.object(m, "_ddb", _ddb_ok()):
+                r = m.lambda_handler(_get_event(client_id="anything"), _ctx())
         finally:
-            os.environ["GOOGLE_CLIENT_ID"] = original or CLIENT_ID
-        # Missing CLIENT_ID is a required var → config error (500)
-        assert r["statusCode"] in (200, 400, 500)  # config-dependent
+            if orig:
+                os.environ["GOOGLE_CLIENT_ID"] = orig
+        assert r["statusCode"] != 400
 
 
-# ── GET — redirect_uri validation ─────────────────────────────────────────────
-class TestGetRedirectUriValidation:
-    def test_empty_redirect_uri_returns_400_html(self):
-        m = _load()
-        r = m.lambda_handler(_get_event(redirect_uri=""), MagicMock())
-        assert r["statusCode"] == 400
-
-    def test_invalid_redirect_uri_returns_400_when_allow_list_set(self):
-        """When ALLOWED_REDIRECT_URIS is non-empty, rejected URIs return 400."""
-        original = os.environ.get("ALLOWED_REDIRECT_URIS")
-        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
-        try:
-            m = _load()
-            r = m.lambda_handler(_get_event(redirect_uri="https://evil.com/cb"), MagicMock())
-        finally:
-            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
-        assert r["statusCode"] == 400
-
-    def test_valid_redirect_uri_passes_when_allow_list_set(self):
-        original = os.environ.get("ALLOWED_REDIRECT_URIS")
-        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
-        try:
-            m = _load()
-            with patch.object(m, "_get_session_user", return_value=None):
-                r = m.lambda_handler(_get_event(redirect_uri=REDIRECT_URI), MagicMock())
-        finally:
-            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
-        assert r["statusCode"] == 200
-
-
-# ── GET — response_type validation ────────────────────────────────────────────
-class TestGetResponseType:
-    def test_wrong_response_type_redirects_with_error(self):
-        m = _load()
-        r = m.lambda_handler(_get_event(response_type="token"), MagicMock())
-        assert r["statusCode"] == 302
-        _, params = _parse_redirect(r)
-        assert params["error"] == "unsupported_response_type"
-
-    def test_wrong_response_type_echoes_state(self):
-        m = _load()
-        r = m.lambda_handler(_get_event(response_type="token", state="my-state"), MagicMock())
-        _, params = _parse_redirect(r)
-        assert params.get("state") == "my-state"
-
-    def test_code_response_type_shows_login_form(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(_get_event(response_type="code"), MagicMock())
-        assert r["statusCode"] == 200
-        assert "text/html" in r["headers"]["Content-Type"]
-
-
-# ── GET — pre_auth_state (seamless flow) ──────────────────────────────────────
-class TestGetPreAuthFlow:
-    def test_valid_pre_auth_state_redirects_with_code(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_get_event(pre_auth_state=PRE_AUTH), MagicMock())
-        assert r["statusCode"] == 302
-        _, params = _parse_redirect(r)
-        assert "code" in params
-
-    def test_valid_pre_auth_state_echoes_google_state(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_get_event(pre_auth_state=PRE_AUTH, state=GOOGLE_STATE), MagicMock())
-        _, params = _parse_redirect(r)
-        assert params["state"] == GOOGLE_STATE
-
-    def test_invalid_pre_auth_state_shows_login_form(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(_get_event(pre_auth_state=PRE_AUTH), MagicMock())
-        # Falls through to login form
-        assert r["statusCode"] == 200
-        assert "text/html" in r["headers"]["Content-Type"]
-
-    def test_store_auth_code_failure_redirects_with_server_error(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code", side_effect=Exception("ddb error")):
-                r = m.lambda_handler(_get_event(pre_auth_state=PRE_AUTH), MagicMock())
-        assert r["statusCode"] == 302
-        _, params = _parse_redirect(r)
-        assert params["error"] == "server_error"
-
-
-# ── GET — login form ──────────────────────────────────────────────────────────
-class TestGetLoginForm:
-    def test_returns_200_html(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(_get_event(), MagicMock())
-        assert r["statusCode"] == 200
-        assert "text/html" in r["headers"]["Content-Type"]
-
-    def test_html_contains_form(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(_get_event(), MagicMock())
-        assert "<form" in r["body"]
-
-    def test_html_contains_hidden_redirect_uri(self):
-        m = _load()
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(_get_event(redirect_uri=REDIRECT_URI), MagicMock())
-        import html
-        assert html.escape(REDIRECT_URI) in r["body"]
-
-
-# ── POST — missing credentials ────────────────────────────────────────────────
-class TestPostMissingCredentials:
-    def test_missing_username_shows_login_form_with_error(self):
-        m = _load()
-        r = m.lambda_handler(_post_event(username="", password="secret"), MagicMock())
-        assert r["statusCode"] == 200
-        assert "text/html" in r["headers"]["Content-Type"]
-
-    def test_missing_password_shows_login_form_with_error(self):
-        m = _load()
-        r = m.lambda_handler(_post_event(username="user@example.com", password=""), MagicMock())
-        assert r["statusCode"] == 200
-
-
-# ── POST — login failed ───────────────────────────────────────────────────────
-class TestPostLoginFailed:
-    def test_bad_credentials_returns_200_with_error(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=None):
-            r = m.lambda_handler(_post_event(), MagicMock())
-        assert r["statusCode"] == 200
-        assert "text/html" in r["headers"]["Content-Type"]
-
-    def test_error_message_in_response(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=None):
-            r = m.lambda_handler(_post_event(), MagicMock())
-        assert "Incorrect" in r["body"] or "error" in r["body"].lower()
-
-
-# ── POST — login success ──────────────────────────────────────────────────────
-class TestPostLoginSuccess:
-    def test_valid_credentials_redirects_302(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_post_event(), MagicMock())
-        assert r["statusCode"] == 302
-
-    def test_redirect_contains_code_param(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_post_event(state=GOOGLE_STATE), MagicMock())
-        _, params = _parse_redirect(r)
-        assert "code" in params
-
-    def test_redirect_echoes_google_state(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_post_event(state=GOOGLE_STATE), MagicMock())
-        _, params = _parse_redirect(r)
-        assert params["state"] == GOOGLE_STATE
-
-    def test_redirect_goes_to_correct_redirect_uri(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_post_event(redirect_uri=REDIRECT_URI), MagicMock())
-        location = r["headers"]["Location"]
-        assert location.startswith(REDIRECT_URI)
-
-    def test_store_auth_code_called_with_user_id(self):
-        m = _load()
-        with patch.object(m, "_authenticate_cognito", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code") as mock_store:
-                m.lambda_handler(_post_event(), MagicMock())
-        assert mock_store.call_args[0][1] == USER_ID  # second arg is user_id
-
-
-# ── POST — validation ─────────────────────────────────────────────────────────
-class TestPostValidation:
-    def test_invalid_client_id_returns_400(self):
-        m = _load()
-        r = m.lambda_handler(_post_event(client_id="wrong-client"), MagicMock())
-        assert r["statusCode"] == 400
-
+# ── redirect_uri validation ────────────────────────────────────────────────────
+class TestRedirectUriValidation:
     def test_empty_redirect_uri_returns_400(self):
         m = _load()
-        r = m.lambda_handler(_post_event(redirect_uri=""), MagicMock())
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(redirect_uri=""), _ctx())
         assert r["statusCode"] == 400
 
-    def test_invalid_redirect_uri_returns_400_when_allow_list_set(self):
-        original = os.environ.get("ALLOWED_REDIRECT_URIS")
-        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
+    def test_redirect_uri_not_in_allowlist_returns_400(self):
+        orig = os.environ.get("ALLOWED_REDIRECT_URIS", "")
+        os.environ["ALLOWED_REDIRECT_URIS"] = "https://allowed.example.com/cb"
         try:
             m = _load()
-            r = m.lambda_handler(_post_event(redirect_uri="https://evil.com/cb"), MagicMock())
+            with patch.object(m, "_ddb", _ddb_ok()):
+                r = m.lambda_handler(_get_event(redirect_uri="https://evil.com/steal"), _ctx())
         finally:
-            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
+            os.environ["ALLOWED_REDIRECT_URIS"] = orig
         assert r["statusCode"] == 400
 
-
-# ── Config error ──────────────────────────────────────────────────────────────
-class TestConfigError:
-    def test_missing_google_client_id_returns_500_html(self):
-        original = os.environ.get("GOOGLE_CLIENT_ID")
-        os.environ["GOOGLE_CLIENT_ID"] = ""
+    def test_redirect_uri_in_allowlist_passes(self):
+        allowed = "https://allowed.example.com/callback"
+        orig = os.environ.get("ALLOWED_REDIRECT_URIS", "")
+        os.environ["ALLOWED_REDIRECT_URIS"] = allowed
         try:
             m = _load()
-            r = m.lambda_handler(_get_event(), MagicMock())
+            with patch.object(m, "_ddb", _ddb_ok()):
+                r = m.lambda_handler(_get_event(redirect_uri=allowed), _ctx())
         finally:
-            os.environ["GOOGLE_CLIENT_ID"] = original or CLIENT_ID
-        assert r["statusCode"] == 500
-        assert "text/html" in r["headers"]["Content-Type"]
+            os.environ["ALLOWED_REDIRECT_URIS"] = orig
+        assert r["statusCode"] == 302
 
-    def test_missing_cognito_client_id_returns_500_html(self):
-        original = os.environ.get("COGNITO_CLIENT_ID")
-        os.environ["COGNITO_CLIENT_ID"] = ""
+    def test_empty_allowlist_accepts_any_uri(self):
+        orig = os.environ.get("ALLOWED_REDIRECT_URIS", "")
+        os.environ["ALLOWED_REDIRECT_URIS"] = ""
         try:
             m = _load()
-            r = m.lambda_handler(_get_event(), MagicMock())
+            with patch.object(m, "_ddb", _ddb_ok()):
+                r = m.lambda_handler(_get_event(redirect_uri="https://anything.example.com/cb"), _ctx())
         finally:
-            os.environ["COGNITO_CLIENT_ID"] = original or "test-cognito-client-id"
-        assert r["statusCode"] == 500
+            os.environ["ALLOWED_REDIRECT_URIS"] = orig
+        assert r["statusCode"] == 302
 
-
-# ── App Flip — Bearer token path ──────────────────────────────────────────────
-def _app_flip_event(
-    token="valid-access-token",
-    client_id=CLIENT_ID,
-    redirect_uri=REDIRECT_URI,
-    state=GOOGLE_STATE,
-    scope="profile",
-    method="POST",
-    use_query_params=False,
-):
-    """Build an App Flip event: Bearer Authorization header + JSON body (or query params)."""
-    params = {
-        "client_id":     client_id,
-        "redirect_uri":  redirect_uri,
-        "state":         state,
-        "scope":         scope,
-        "response_type": "code",
-    }
-    event = {
-        "httpMethod": method,
-        "path": "/google-home/oauth/authorize",
-        "headers": {"Authorization": f"Bearer {token}"},
-    }
-    if use_query_params:
-        event["queryStringParameters"] = params
-    else:
-        event["body"] = json.dumps(params)
-    return event
-
-
-class TestAppFlip:
-    # ── Positive cases ──────────────────────────────────────────────────────
-
-    def test_valid_token_returns_200_json(self):
-        """Valid Bearer token → 200 with JSON code + state (not an HTML redirect)."""
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_app_flip_event(), MagicMock())
-        assert r["statusCode"] == 200
-        assert "application/json" in r["headers"]["Content-Type"]
-
-    def test_response_contains_code(self):
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_app_flip_event(), MagicMock())
-        body = json.loads(r["body"])
-        assert "code" in body
-        assert len(body["code"]) > 8
-
-    def test_response_echoes_state(self):
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(_app_flip_event(state=GOOGLE_STATE), MagicMock())
-        body = json.loads(r["body"])
-        assert body["state"] == GOOGLE_STATE
-
-    def test_store_auth_code_called_with_correct_user_id(self):
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code") as mock_store:
-                m.lambda_handler(_app_flip_event(), MagicMock())
-        mock_store.assert_called_once()
-        assert mock_store.call_args[0][1] == USER_ID  # (code, userId, redirect_uri, scope)
-
-    def test_store_auth_code_called_with_correct_redirect_uri(self):
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code") as mock_store:
-                m.lambda_handler(_app_flip_event(redirect_uri=REDIRECT_URI), MagicMock())
-        assert mock_store.call_args[0][2] == REDIRECT_URI
-
-    def test_oauth_params_from_query_string_work(self):
-        """App Flip also works with OAuth params in the query string (GET + Bearer)."""
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(
-                    _app_flip_event(method="GET", use_query_params=True), MagicMock()
-                )
-        assert r["statusCode"] == 200
-        body = json.loads(r["body"])
-        assert "code" in body
-
-    def test_bearer_header_case_insensitive(self):
-        """Authorization header key is case-insensitive."""
-        m = _load()
-        event = _app_flip_event()
-        event["headers"] = {"authorization": f"Bearer valid-token"}
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code"):
-                r = m.lambda_handler(event, MagicMock())
-        assert r["statusCode"] == 200
-
-    def test_malformed_json_body_falls_back_to_empty_params(self):
-        """Malformed body doesn't crash — returns 400 for missing client_id."""
-        m = _load()
-        event = _app_flip_event()
-        event["body"] = "not-json{"
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            r = m.lambda_handler(event, MagicMock())
-        # client_id will be empty → invalid_client
-        assert r["statusCode"] == 400
-        body = json.loads(r["body"])
-        assert body["error"] == "invalid_client"
-
-    # ── Negative cases ──────────────────────────────────────────────────────
-
-    def test_invalid_token_returns_401(self):
-        """Cognito rejects the token → 401 JSON, no auth code issued."""
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=None):
-            r = m.lambda_handler(_app_flip_event(token="expired-token"), MagicMock())
-        assert r["statusCode"] == 401
-        body = json.loads(r["body"])
-        assert body["error"] == "unauthorized"
-
-    def test_invalid_token_does_not_store_auth_code(self):
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=None):
-            with patch.object(m, "_store_auth_code") as mock_store:
-                m.lambda_handler(_app_flip_event(token="bad"), MagicMock())
-        mock_store.assert_not_called()
-
-    def test_wrong_client_id_returns_400(self):
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            r = m.lambda_handler(_app_flip_event(client_id="wrong-client"), MagicMock())
-        assert r["statusCode"] == 400
-        body = json.loads(r["body"])
-        assert body["error"] == "invalid_client"
-
-    def test_wrong_redirect_uri_returns_400_when_allow_list_set(self):
-        original = os.environ.get("ALLOWED_REDIRECT_URIS")
-        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
+    def test_multiple_allowed_uris_second_matches(self):
+        uri_a, uri_b = "https://a.example.com/cb", "https://b.example.com/cb"
+        orig = os.environ.get("ALLOWED_REDIRECT_URIS", "")
+        os.environ["ALLOWED_REDIRECT_URIS"] = f"{uri_a},{uri_b}"
         try:
             m = _load()
-            with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-                r = m.lambda_handler(
-                    _app_flip_event(redirect_uri="https://evil.com/steal"), MagicMock()
-                )
+            with patch.object(m, "_ddb", _ddb_ok()):
+                r = m.lambda_handler(_get_event(redirect_uri=uri_b), _ctx())
         finally:
-            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
-        assert r["statusCode"] == 400
-        body = json.loads(r["body"])
-        assert body["error"] == "invalid_redirect_uri"
+            os.environ["ALLOWED_REDIRECT_URIS"] = orig
+        assert r["statusCode"] == 302
 
-    def test_wrong_redirect_uri_does_not_store_auth_code(self):
-        original = os.environ.get("ALLOWED_REDIRECT_URIS")
-        os.environ["ALLOWED_REDIRECT_URIS"] = REDIRECT_URI
+    def test_redirect_uri_not_in_allowlist_does_not_store_transaction(self):
+        orig = os.environ.get("ALLOWED_REDIRECT_URIS", "")
+        os.environ["ALLOWED_REDIRECT_URIS"] = "https://allowed.example.com/cb"
         try:
             m = _load()
-            with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-                with patch.object(m, "_store_auth_code") as mock_store:
-                    m.lambda_handler(
-                        _app_flip_event(redirect_uri="https://evil.com/steal"), MagicMock()
-                    )
+            with patch.object(m, "_ddb") as mock_ddb:
+                m.lambda_handler(_get_event(redirect_uri="https://evil.com/steal"), _ctx())
         finally:
-            os.environ["ALLOWED_REDIRECT_URIS"] = original or ""
-        mock_store.assert_not_called()
+            os.environ["ALLOWED_REDIRECT_URIS"] = orig
+        mock_ddb.return_value.Table.return_value.put_item.assert_not_called()
 
-    def test_ddb_failure_returns_500(self):
-        """If DynamoDB write fails, return 500 — don't crash or redirect."""
-        m = _load()
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            with patch.object(m, "_store_auth_code", side_effect=Exception("DDB timeout")):
-                r = m.lambda_handler(_app_flip_event(), MagicMock())
-        assert r["statusCode"] == 500
-        body = json.loads(r["body"])
-        assert body["error"] == "server_error"
 
-    def test_empty_body_and_no_query_params_returns_400(self):
-        """No OAuth params at all → invalid_client (empty client_id)."""
+# ── response_type validation ───────────────────────────────────────────────────
+class TestResponseTypeValidation:
+    def test_response_type_token_redirects_error(self):
         m = _load()
-        event = {
-            "httpMethod": "POST",
-            "path": "/google-home/oauth/authorize",
-            "headers": {"Authorization": "Bearer valid-token"},
-            "body": "{}",
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(response_type="token"), _ctx())
+        assert r["statusCode"] == 302
+        assert "error=unsupported_response_type" in r["headers"]["Location"]
+
+    def test_response_type_empty_redirects_error(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(response_type=""), _ctx())
+        assert "error=unsupported_response_type" in r["headers"]["Location"]
+
+    def test_response_type_error_echoes_state(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(response_type="token"), _ctx())
+        qs = parse_qs(urlparse(r["headers"]["Location"]).query)
+        assert qs["state"][0] == GOOGLE_STATE
+
+    def test_response_type_code_is_valid(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(response_type="code"), _ctx())
+        assert "error" not in r["headers"]["Location"]
+
+    def test_response_type_error_does_not_store_transaction(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            m.lambda_handler(_get_event(response_type="token"), _ctx())
+        mock_ddb.return_value.Table.return_value.put_item.assert_not_called()
+
+
+# ── state validation ───────────────────────────────────────────────────────────
+class TestStateValidation:
+    def test_empty_state_redirects_invalid_request(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(state=""), _ctx())
+        assert r["statusCode"] == 302
+        assert "error=invalid_request" in r["headers"]["Location"]
+
+    def test_empty_state_does_not_store_transaction(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            m.lambda_handler(_get_event(state=""), _ctx())
+        mock_ddb.return_value.Table.return_value.put_item.assert_not_called()
+
+    def test_whitespace_only_state_treated_as_empty(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(state="   "), _ctx())
+        assert "error=invalid_request" in r["headers"]["Location"]
+
+    def test_valid_state_passed_to_cognito_url(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(state="my-csrf-token-123"), _ctx())
+        qs = parse_qs(urlparse(r["headers"]["Location"]).query)
+        assert qs["state"][0] == "my-csrf-token-123"
+
+
+# ── DynamoDB transaction storage ──────────────────────────────────────────────
+class TestTransactionStorage:
+    def test_put_item_called_once(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(_get_event(), _ctx())
+        mock_ddb.return_value.Table.return_value.put_item.assert_called_once()
+
+    def test_transaction_state_matches_google_state(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(_get_event(), _ctx())
+        item = mock_ddb.return_value.Table.return_value.put_item.call_args[1]["Item"]
+        assert item["state"] == GOOGLE_STATE
+
+    def test_transaction_stores_client_id(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(_get_event(), _ctx())
+        item = mock_ddb.return_value.Table.return_value.put_item.call_args[1]["Item"]
+        assert item["client_id"] == CLIENT_ID
+
+    def test_transaction_stores_redirect_uri(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(_get_event(), _ctx())
+        item = mock_ddb.return_value.Table.return_value.put_item.call_args[1]["Item"]
+        assert item["redirect_uri"] == REDIRECT_URI
+
+    def test_transaction_stores_custom_scope(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(_get_event(scope="openid email"), _ctx())
+        item = mock_ddb.return_value.Table.return_value.put_item.call_args[1]["Item"]
+        assert item["scope"] == "openid email"
+
+    def test_transaction_scope_defaults_to_profile(self):
+        m = _load()
+        ev = _get_event()
+        ev["queryStringParameters"].pop("scope")
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(ev, _ctx())
+        item = mock_ddb.return_value.Table.return_value.put_item.call_args[1]["Item"]
+        assert item["scope"] == "profile"
+
+    def test_transaction_ttl_greater_than_created_at(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.return_value = {}
+            m.lambda_handler(_get_event(), _ctx())
+        item = mock_ddb.return_value.Table.return_value.put_item.call_args[1]["Item"]
+        assert item["ttl"] > item["created_at"]
+
+    def test_ddb_client_error_redirects_server_error(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.side_effect = ClientError(
+                {"Error": {"Code": "InternalServerError", "Message": "boom"}}, "PutItem"
+            )
+            r = m.lambda_handler(_get_event(), _ctx())
+        assert r["statusCode"] == 302
+        assert "error=server_error" in r["headers"]["Location"]
+
+    def test_ddb_error_echoes_state(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.side_effect = ClientError(
+                {"Error": {"Code": "ThrottlingException", "Message": "x"}}, "PutItem"
+            )
+            r = m.lambda_handler(_get_event(), _ctx())
+        qs = parse_qs(urlparse(r["headers"]["Location"]).query)
+        assert qs["state"][0] == GOOGLE_STATE
+
+    def test_ddb_error_redirect_goes_to_redirect_uri(self):
+        m = _load()
+        with patch.object(m, "_ddb") as mock_ddb:
+            mock_ddb.return_value.Table.return_value.put_item.side_effect = ClientError(
+                {"Error": {"Code": "InternalServerError", "Message": "x"}}, "PutItem"
+            )
+            r = m.lambda_handler(_get_event(), _ctx())
+        assert r["headers"]["Location"].startswith(REDIRECT_URI)
+
+
+# ── Cognito redirect URL ──────────────────────────────────────────────────────
+class TestCognitoRedirectUrl:
+    def _qs(self) -> dict:
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(), _ctx())
+        assert r["statusCode"] == 302
+        return parse_qs(urlparse(r["headers"]["Location"]).query)
+
+    def test_redirects_to_cognito_domain(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(), _ctx())
+        assert "auth.test.example.com" in r["headers"]["Location"]
+
+    def test_url_has_oauth2_authorize_path(self):
+        m = _load()
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(_get_event(), _ctx())
+        assert "/oauth2/authorize" in r["headers"]["Location"]
+
+    def test_cognito_response_type_is_code(self):
+        assert self._qs()["response_type"][0] == "code"
+
+    def test_cognito_client_id_is_cognito_client(self):
+        assert self._qs()["client_id"][0] == "test-cognito-client-id"
+
+    def test_cognito_redirect_uri_points_to_callback(self):
+        assert "cognito/callback" in self._qs()["redirect_uri"][0]
+
+    def test_cognito_state_equals_google_state(self):
+        assert self._qs()["state"][0] == GOOGLE_STATE
+
+    def test_cognito_scope_includes_openid(self):
+        assert "openid" in self._qs()["scope"][0]
+
+    def test_cognito_has_prompt_login(self):
+        """prompt=login must force login on every GH account-linking attempt."""
+        assert self._qs().get("prompt", [None])[0] == "login"
+
+    def test_null_query_string_parameters_handled(self):
+        m = _load()
+        ev = {
+            "httpMethod": "GET",
+            "queryStringParameters": None,
+            "requestContext": {"identity": {"sourceIp": ""}},
         }
-        with patch.object(m, "_validate_cognito_access_token", return_value=USER_ID):
-            r = m.lambda_handler(event, MagicMock())
-        assert r["statusCode"] == 400
-
-    def test_no_bearer_prefix_is_not_app_flip_goes_to_normal_flow(self):
-        """A non-Bearer Authorization header (e.g. Basic) must NOT trigger App Flip."""
-        m = _load()
-        event = _app_flip_event()
-        event["headers"] = {"Authorization": "Basic dXNlcjpwYXNz"}
-        with patch.object(m, "_get_session_user", return_value=None):
-            r = m.lambda_handler(event, MagicMock())
-        # Falls through to GET/POST normal handler (login form = 200 HTML or 302)
-        assert r["statusCode"] in (200, 302, 400, 405)
-        # Must NOT be the JSON App Flip response
-        assert "application/json" not in r["headers"].get("Content-Type", "")
-
-
-# ── Method not allowed ────────────────────────────────────────────────────────
-class TestMethodNotAllowed:
-    def test_put_method_returns_405(self):
-        m = _load()
-        r = m.lambda_handler({"httpMethod": "PUT"}, MagicMock())
-        assert r["statusCode"] == 405
+        with patch.object(m, "_ddb", _ddb_ok()):
+            r = m.lambda_handler(ev, _ctx())
+        assert r["statusCode"] in (400, 302, 500)

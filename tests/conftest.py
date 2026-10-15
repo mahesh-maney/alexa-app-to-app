@@ -67,3 +67,24 @@ os.environ.setdefault("GH_DEEP_LINK_PATH",            "setup/ha_linking")
 os.environ.setdefault("GH_TOKENS_ACCESS_TOKEN_INDEX", "accessToken-index")
 os.environ.setdefault("GOOGLE_SA_KEY_SECRET_ARN",     "")   # empty = Home Graph unlink skipped in tests
 os.environ.setdefault("DEVICE_MANUFACTURER",          "Digilux")
+os.environ.setdefault("DEVICE_MODEL",                 "Test Smart Device")
+
+# ── Google Home OAuth v2 (authorize + cognito_callback) ────────────────────────
+os.environ.setdefault("COGNITO_HOSTED_UI_DOMAIN",    "auth.test.example.com")
+os.environ.setdefault("COGNITO_CALLBACK_URI",
+                       "https://iot.test.example.com/smarthome/google-home/oauth/cognito/callback")
+os.environ.setdefault("GH_OAUTH_TRANSACTIONS_TABLE", "google_home_oauth_transactions")
+os.environ.setdefault("TRANSACTION_TTL_SECONDS",     "600")
+os.environ.setdefault("BRAND_SUBTITLE",              "Identity Server")
+os.environ.setdefault("PRIVACY_POLICY_URL",          "https://example.com/privacy-policy")
+os.environ.setdefault("TERMS_URL",                   "https://example.com/terms")
+
+# ── Google Home fulfillment extra tables / resources ───────────────────────────
+os.environ.setdefault("USER_DEVICE_DETAILS_TABLE",   "user_device_details")
+os.environ.setdefault("SCENE_TABLE",                 "digilux_scene_data")
+os.environ.setdefault("SCENE_GSI_NAME",              "GSI_scene")
+os.environ.setdefault("DEVICE_STATE_TABLE",          "device_state")
+os.environ.setdefault("METADATA_BUCKET",             "test-metadata-bucket")
+os.environ.setdefault("ENDPOINT_KEY_SECRET_ARN",
+                       "arn:aws:secretsmanager:eu-west-1:000000000000:secret:test/key")
+os.environ.setdefault("ENDPOINT_KEY_REGION",         "eu-west-1")

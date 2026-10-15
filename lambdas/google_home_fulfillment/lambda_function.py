@@ -849,7 +849,8 @@ def _handle_query(payload: dict, user_id: str, request_id: str) -> dict:
         gh_state: dict = {"online": True, "status": "SUCCESS"}
 
         if ep_type in _COVER_TYPES:
-            raw_onoff = int(state.get("onOff") or 2)
+            _raw = state.get("onOff")
+            raw_onoff = int(_raw) if _raw is not None else 2
             open_pct = {2: 100, 4: 0}.get(raw_onoff, 50)
             is_stopped = raw_onoff in (0, 3)
             gh_state["openPercent"] = open_pct
