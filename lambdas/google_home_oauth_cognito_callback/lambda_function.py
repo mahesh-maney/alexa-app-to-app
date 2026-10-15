@@ -221,7 +221,6 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     """
     safe_app   = html.escape(_APP_NAME)
     safe_email = html.escape(user_email or "your account")
-    safe_scope = html.escape(scope or "smart home control")
     safe_state = html.escape(state)
 
     def hidden(name: str, value: str) -> str:
@@ -232,123 +231,177 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Link {safe_app} with Google Home</title>
+  <title>Authorization — DIGILUX</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #f5f5f5;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      background: #fff;
+      max-width: 480px;
+      margin: 0 auto;
       min-height: 100vh;
-      padding: 20px;
+      display: flex;
+      flex-direction: column;
     }}
-    .card {{
-      background: white;
-      border-radius: 12px;
-      padding: 40px 32px;
-      max-width: 420px;
-      width: 100%;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    .brand-header {{
+      padding: 20px 24px 16px;
+      border-bottom: 1px solid #e0e0e0;
     }}
-    .logo {{
-      text-align: center;
-      margin-bottom: 24px;
+    .brand-header .brand-name {{
+      font-size: 22px;
+      font-weight: 900;
+      letter-spacing: 1px;
+      color: #1a1a1a;
+      text-transform: uppercase;
     }}
-    .logo svg {{ width: 48px; height: 48px; }}
-    h1 {{ font-size: 22px; font-weight: 600; color: #1a1a1a; margin-bottom: 8px; text-align: center; }}
-    .subtitle {{ font-size: 14px; color: #666; text-align: center; margin-bottom: 28px; }}
-    .account-box {{
-      background: #f0f7ff;
-      border: 1.5px solid #d0e4ff;
-      border-radius: 8px;
-      padding: 14px 16px;
+    .brand-header .brand-sub {{
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: #888;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }}
+    .content {{
+      flex: 1;
+      padding: 28px 24px 24px;
+    }}
+    h1 {{
+      font-size: 26px;
+      font-weight: 700;
+      color: #1a1a1a;
       margin-bottom: 20px;
     }}
-    .account-box .label {{ font-size: 12px; color: #666; margin-bottom: 4px; }}
-    .account-box .email {{ font-size: 15px; font-weight: 600; color: #1a1a1a; }}
-    .permission-box {{
-      background: #fffbf0;
-      border: 1.5px solid #ffe8a0;
-      border-radius: 8px;
+    .notice-box {{
+      background: #fdf6e3;
+      border: 1px solid #e8d8a0;
+      border-radius: 4px;
       padding: 14px 16px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: #444;
+      line-height: 1.5;
+      text-align: center;
+    }}
+    .notice-box strong {{ color: #1a1a1a; }}
+    .perm-box {{
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }}
+    .perm-box .perm-label {{
+      font-size: 14px;
+      color: #444;
+      margin-bottom: 12px;
+    }}
+    .perm-box ul {{
+      list-style: none;
+      padding: 0;
+    }}
+    .perm-box ul li {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 15px;
+      color: #1a1a1a;
+      margin-bottom: 10px;
+    }}
+    .perm-box ul li:last-child {{ margin-bottom: 0; }}
+    .perm-box ul li svg {{
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      color: #555;
+    }}
+    .trust-text {{
+      font-size: 13px;
+      color: #333;
+      margin-bottom: 6px;
+      font-weight: 500;
+    }}
+    .privacy-text {{
+      font-size: 13px;
+      color: #555;
+      line-height: 1.6;
       margin-bottom: 28px;
     }}
-    .permission-box p {{ font-size: 13px; color: #555; line-height: 1.5; }}
-    .permission-box strong {{ color: #b45309; }}
-    .btn-approve {{
-      display: block;
-      width: 100%;
-      padding: 14px;
-      background: #1a73e8;
-      color: white;
+    .privacy-text a {{ color: #1a73e8; text-decoration: underline; }}
+    .btn-row {{
+      display: flex;
+      gap: 12px;
+    }}
+    .btn-deny, .btn-allow {{
+      flex: 1;
+      padding: 15px;
       border: none;
-      border-radius: 8px;
-      font-size: 16px;
-      font-weight: 600;
+      border-radius: 4px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
       cursor: pointer;
-      margin-bottom: 12px;
-      transition: background 0.2s;
+      text-transform: uppercase;
+      background: #222;
+      color: #fff;
+      transition: background 0.15s;
     }}
-    .btn-approve:hover {{ background: #1558b0; }}
-    .btn-cancel {{
-      display: block;
-      width: 100%;
-      padding: 14px;
-      background: white;
-      color: #444;
-      border: 1.5px solid #ddd;
-      border-radius: 8px;
-      font-size: 16px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background 0.2s, border-color 0.2s;
-    }}
-    .btn-cancel:hover {{ background: #f5f5f5; border-color: #bbb; }}
-    .footer {{ text-align: center; margin-top: 24px; font-size: 12px; color: #999; }}
+    .btn-deny:hover {{ background: #000; }}
+    .btn-allow:hover {{ background: #111; }}
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="logo">
-      <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect width="48" height="48" rx="12" fill="#1a73e8"/>
-        <path d="M24 12C17.373 12 12 17.373 12 24s5.373 12 12 12 12-5.373 12-12-5.373-12-12-12zm0 4a8 8 0 110 16 8 8 0 010-16z" fill="white" opacity="0.9"/>
-        <circle cx="24" cy="24" r="4" fill="white"/>
-      </svg>
+  <div class="brand-header">
+    <div class="brand-name">DIGILUX</div>
+    <div class="brand-sub">Identity Server</div>
+  </div>
+
+  <div class="content">
+    <h1>Authorization</h1>
+
+    <div class="notice-box">
+      By clicking <strong>Allow</strong>, you authorize <strong>Google</strong> to
+      access the following information.
     </div>
 
-    <h1>Link {safe_app}</h1>
-    <p class="subtitle">Google Home is requesting access to your account</p>
-
-    <div class="account-box">
-      <div class="label">Signed in as</div>
-      <div class="email">{safe_email}</div>
+    <div class="perm-box">
+      <div class="perm-label">Granting permission to:</div>
+      <ul>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+            <polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+          discoverdevices
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+            <polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+          controldevices
+        </li>
+      </ul>
     </div>
 
-    <div class="permission-box">
-      <p>
-        Google Home will be able to:<br><br>
-        <strong>Control your smart home devices</strong> — turn on/off lights, fans,
-        scenes and other {safe_app} devices using voice commands.
-      </p>
-    </div>
+    <p class="trust-text">Make sure you trust Google</p>
+    <p class="privacy-text">
+      You may be sharing sensitive info with this site or app. Learn about how
+      your data is handled by reviewing DIGILUX's
+      <a href="https://digilux.co.in/privacy-policy.jsp" target="_blank">Privacy Policy</a>
+      and
+      <a href="https://digilux.co.in/terms-of-use.jsp" target="_blank">Terms &amp; Conditions</a>.
+    </p>
 
-    <form method="POST" action="/smarthome/google-home/oauth/consent">
-      {hidden("state", safe_state)}
-      {hidden("action", "approve")}
-      <button type="submit" class="btn-approve">Allow</button>
-    </form>
-
-    <form method="POST" action="/smarthome/google-home/oauth/consent">
-      {hidden("state", safe_state)}
-      {hidden("action", "cancel")}
-      <button type="submit" class="btn-cancel">Cancel</button>
-    </form>
-
-    <div class="footer">
-      You can revoke access at any time from the Google Home app.
+    <div class="btn-row">
+      <form method="POST" action="/smarthome/google-home/oauth/consent" style="flex:1">
+        {hidden("state", safe_state)}
+        {hidden("action", "cancel")}
+        <button type="submit" class="btn-deny" style="width:100%">DENY</button>
+      </form>
+      <form method="POST" action="/smarthome/google-home/oauth/consent" style="flex:1">
+        {hidden("state", safe_state)}
+        {hidden("action", "approve")}
+        <button type="submit" class="btn-allow" style="width:100%">ALLOW</button>
+      </form>
     </div>
   </div>
 </body>

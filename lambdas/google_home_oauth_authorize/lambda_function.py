@@ -152,6 +152,7 @@ def _build_cognito_authorize_url(state: str) -> str:
         "redirect_uri":  _COGNITO_CALLBACK_URI,
         "state":         state,
         "scope":         "openid email profile",
+        "prompt":        "login",
     }
     url = f"https://{_COGNITO_DOMAIN}/oauth2/authorize?{urllib.parse.urlencode(params)}"
     logger.debug("COGNITO_AUTHORIZE_URL %s", url[:120])

@@ -88,6 +88,7 @@ ALEXA_TOKENS_TABLE=$(cfg ALEXA_TOKENS_TABLE)
 GH_SESSIONS_TABLE=$(cfg GH_SESSIONS_TABLE)
 GH_AUTH_CODES_TABLE=$(cfg GH_AUTH_CODES_TABLE)
 GH_TOKENS_TABLE=$(cfg GH_TOKENS_TABLE)
+GH_OAUTH_TRANSACTIONS_TABLE=$(cfg GH_OAUTH_TRANSACTIONS_TABLE)
 USER_DEVICE_MAPPING_TABLE=$(cfg USER_DEVICE_MAPPING_TABLE)
 
 LWA_SECRET_ARN=$(cfg LWA_SECRET_ARN)
@@ -104,6 +105,9 @@ GOOGLE_SECRET_REGION=$(cfg GOOGLE_SECRET_REGION)
 GOOGLE_AGENT_ID=$(cfg GOOGLE_AGENT_ID)
 GOOGLE_CLIENT_ID=$(cfg GOOGLE_CLIENT_ID)
 GOOGLE_REDIRECT_URI=$(cfg GOOGLE_REDIRECT_URI)
+COGNITO_HOSTED_UI_DOMAIN=$(cfg COGNITO_HOSTED_UI_DOMAIN)
+COGNITO_CALLBACK_URI=$(cfg COGNITO_CALLBACK_URI)
+TRANSACTION_TTL_SECONDS=$(cfg TRANSACTION_TTL_SECONDS)
 
 APP_DEEP_LINK_SCHEME=$(cfg APP_DEEP_LINK_SCHEME)
 APP_NAME=$(cfg APP_NAME)
@@ -680,9 +684,10 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
 # ── Step 4b: DynamoDB ─────────────────────────────────────────────────────────
 _section "STEP 4b — GOOGLE HOME DynamoDB TABLES"
 
-ensure_ddb_table "$GH_SESSIONS_TABLE"   "state"
-ensure_ddb_table "$GH_AUTH_CODES_TABLE" "code"
-ensure_ddb_table "$GH_TOKENS_TABLE"     "userId"
+ensure_ddb_table "$GH_SESSIONS_TABLE"              "state"
+ensure_ddb_table "$GH_AUTH_CODES_TABLE"            "code"
+ensure_ddb_table "$GH_TOKENS_TABLE"                "userId"
+ensure_ddb_table "$GH_OAUTH_TRANSACTIONS_TABLE"    "state"
 
 ensure_ddb_gsi "$GH_TOKENS_TABLE" "${GH_TOKENS_ACCESS_TOKEN_INDEX}" "accessToken"
 ensure_ddb_gsi "$GH_TOKENS_TABLE" "refreshToken-index"              "refreshToken"
@@ -693,6 +698,7 @@ _section "STEP 5b — GOOGLE HOME IAM ROLES"
 DDB_GH_SESSIONS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_SESSIONS_TABLE}"
 DDB_GH_CODES_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_AUTH_CODES_TABLE}"
 DDB_GH_TOKENS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_TOKENS_TABLE}"
+DDB_GH_TRANSACTIONS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_OAUTH_TRANSACTIONS_TABLE}"
 DDB_DEVICE_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${USER_DEVICE_MAPPING_TABLE}"
 
 ROLE_GH_START_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-start-role" "{
@@ -735,9 +741,15 @@ ROLE_GH_UNLINK_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-unlink-role" "{
 
 ROLE_GH_AUTHORIZE_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-authorize-role" "{
   \"Version\":\"2012-10-17\",\"Statement\":[
-    {\"Sid\":\"Sessions\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"${DDB_GH_SESSIONS_ARN}\"},
+    {\"Sid\":\"Transactions\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\"],\"Resource\":\"${DDB_GH_TRANSACTIONS_ARN}\"},
+    {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+  ]
+}")
+
+ROLE_GH_CALLBACK_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-callback-role" "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Sid\":\"Transactions\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"${DDB_GH_TRANSACTIONS_ARN}\"},
     {\"Sid\":\"AuthCodes\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\"],\"Resource\":\"${DDB_GH_CODES_ARN}\"},
-    {\"Sid\":\"Cognito\",\"Effect\":\"Allow\",\"Action\":[\"cognito-idp:GetUser\"],\"Resource\":\"*\"},
     {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
   ]
 }")
@@ -804,13 +816,23 @@ deploy_lambda "google_home_unlink" "$ZIP" "$ROLE_GH_UNLINK_ARN" \
 ZIP=$(package_lambda "google_home_oauth_authorize" "${LAMBDA_DIR}/google_home_oauth_authorize")
 deploy_lambda "google_home_oauth_authorize" "$ZIP" "$ROLE_GH_AUTHORIZE_ARN" \
   "$(env_json "${GH_COMMON[@]}" \
-    "GH_SESSIONS_TABLE=${GH_SESSIONS_TABLE}" \
-    "GH_AUTH_CODES_TABLE=${GH_AUTH_CODES_TABLE}" \
     "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}" \
     "ALLOWED_REDIRECT_URIS=${ALLOWED_REDIRECT_URIS}" \
-    "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}" \
     "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" \
-    "COGNITO_REGION=${COGNITO_REGION}" \
+    "COGNITO_HOSTED_UI_DOMAIN=${COGNITO_HOSTED_UI_DOMAIN}" \
+    "COGNITO_CALLBACK_URI=${COGNITO_CALLBACK_URI}" \
+    "GH_OAUTH_TRANSACTIONS_TABLE=${GH_OAUTH_TRANSACTIONS_TABLE}" \
+    "TRANSACTION_TTL_SECONDS=${TRANSACTION_TTL_SECONDS}" \
+    "APP_NAME=${APP_NAME}")" 15
+
+ZIP=$(package_lambda "google_home_oauth_cognito_callback" "${LAMBDA_DIR}/google_home_oauth_cognito_callback")
+deploy_lambda "google_home_oauth_cognito_callback" "$ZIP" "$ROLE_GH_CALLBACK_ARN" \
+  "$(env_json "${GH_COMMON[@]}" \
+    "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" \
+    "COGNITO_HOSTED_UI_DOMAIN=${COGNITO_HOSTED_UI_DOMAIN}" \
+    "COGNITO_CALLBACK_URI=${COGNITO_CALLBACK_URI}" \
+    "GH_OAUTH_TRANSACTIONS_TABLE=${GH_OAUTH_TRANSACTIONS_TABLE}" \
+    "GH_AUTH_CODES_TABLE=${GH_AUTH_CODES_TABLE}" \
     "AUTH_CODE_TTL_SECONDS=${AUTH_CODE_TTL_SECONDS}" \
     "APP_NAME=${APP_NAME}")" 15
 
@@ -855,10 +877,15 @@ AUTHORIZE_ID=$(get_or_create_resource "$OAUTH_ID"   "authorize")
 TOKEN_ID=$(get_or_create_resource     "$OAUTH_ID"   "token")
 FULFILLMENT_ID=$(get_or_create_resource "$ROOT_GH_ID" "fulfillment")
 
-wire_method GET  "$AUTHORIZE_ID"   "google_home_oauth_authorize" "NONE"
-wire_method POST "$AUTHORIZE_ID"   "google_home_oauth_authorize" "NONE"
-wire_method POST "$TOKEN_ID"       "google_home_oauth_token"     "NONE"
-wire_method POST "$FULFILLMENT_ID" "google_home_fulfillment"     "NONE"
+COGNITO_CALLBACK_ID=$(get_or_create_resource "$OAUTH_ID"      "cognito")
+COGNITO_CB_ID=$(get_or_create_resource      "$COGNITO_CALLBACK_ID" "callback")
+CONSENT_ID=$(get_or_create_resource         "$OAUTH_ID"      "consent")
+
+wire_method GET  "$AUTHORIZE_ID"   "google_home_oauth_authorize"        "NONE"
+wire_method GET  "$COGNITO_CB_ID"  "google_home_oauth_cognito_callback"  "NONE"
+wire_method POST "$CONSENT_ID"     "google_home_oauth_cognito_callback"  "NONE"
+wire_method POST "$TOKEN_ID"       "google_home_oauth_token"             "NONE"
+wire_method POST "$FULFILLMENT_ID" "google_home_fulfillment"             "NONE"
 
 _pass "Google Home API Gateway routes wired"
 
