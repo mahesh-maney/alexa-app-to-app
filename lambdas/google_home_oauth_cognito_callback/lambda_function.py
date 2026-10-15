@@ -71,6 +71,9 @@ _TRANSACTIONS_TABLE   = os.environ.get("GH_OAUTH_TRANSACTIONS_TABLE", "google_ho
 _AUTH_CODES_TABLE     = os.environ.get("GH_AUTH_CODES_TABLE", "google_home_auth_codes")
 _AUTH_CODE_TTL_S      = int(os.environ.get("AUTH_CODE_TTL_SECONDS", "300"))
 _APP_NAME             = os.environ.get("APP_NAME", "Digilux Smart Home")
+_BRAND_SUBTITLE       = os.environ.get("BRAND_SUBTITLE", "Identity Server")
+_PRIVACY_POLICY_URL   = os.environ.get("PRIVACY_POLICY_URL", "https://digilux.co.in/privacy-policy.jsp")
+_TERMS_URL            = os.environ.get("TERMS_URL", "https://digilux.co.in/terms-of-use.jsp")
 
 _REQUIRED_VARS = {
     "DATA_REGION":              _REGION,
@@ -91,9 +94,11 @@ else:
     logger.info(
         "CONFIG_OK function=google_home_oauth_cognito_callback region=%s "
         "cognito_domain=%s callback_uri=%s transactions_table=%s "
-        "auth_codes_table=%s auth_code_ttl_seconds=%d",
+        "auth_codes_table=%s auth_code_ttl_seconds=%d "
+        "app_name=%s brand_subtitle=%s privacy_policy_url=%s terms_url=%s",
         _REGION, _COGNITO_DOMAIN, _COGNITO_CALLBACK_URI,
         _TRANSACTIONS_TABLE, _AUTH_CODES_TABLE, _AUTH_CODE_TTL_S,
+        _APP_NAME, _BRAND_SUBTITLE, _PRIVACY_POLICY_URL, _TERMS_URL,
     )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
@@ -219,9 +224,12 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     Render the DIGILUX consent page shown to the user after successful login.
     The form POST goes to /google-home/oauth/consent with action=approve or action=cancel.
     """
-    safe_app   = html.escape(_APP_NAME)
-    safe_email = html.escape(user_email or "your account")
-    safe_state = html.escape(state)
+    safe_app      = html.escape(_APP_NAME)
+    safe_subtitle = html.escape(_BRAND_SUBTITLE)
+    safe_privacy  = html.escape(_PRIVACY_POLICY_URL)
+    safe_terms    = html.escape(_TERMS_URL)
+    safe_email    = html.escape(user_email or "your account")
+    safe_state    = html.escape(state)
 
     def hidden(name: str, value: str) -> str:
         return f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
@@ -231,7 +239,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Authorization — DIGILUX</title>
+  <title>Authorization — {safe_app}</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -350,8 +358,8 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 </head>
 <body>
   <div class="brand-header">
-    <div class="brand-name">DIGILUX</div>
-    <div class="brand-sub">Identity Server</div>
+    <div class="brand-name">{safe_app}</div>
+    <div class="brand-sub">{safe_subtitle}</div>
   </div>
 
   <div class="content">
@@ -385,10 +393,10 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     <p class="trust-text">Make sure you trust Google</p>
     <p class="privacy-text">
       You may be sharing sensitive info with this site or app. Learn about how
-      your data is handled by reviewing DIGILUX's
-      <a href="https://digilux.co.in/privacy-policy.jsp" target="_blank">Privacy Policy</a>
+      your data is handled by reviewing {safe_app}'s
+      <a href="{safe_privacy}" target="_blank">Privacy Policy</a>
       and
-      <a href="https://digilux.co.in/terms-of-use.jsp" target="_blank">Terms &amp; Conditions</a>.
+      <a href="{safe_terms}" target="_blank">Terms &amp; Conditions</a>.
     </p>
 
     <div class="btn-row">
