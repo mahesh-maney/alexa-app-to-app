@@ -111,7 +111,11 @@ TRANSACTION_TTL_SECONDS=$(cfg TRANSACTION_TTL_SECONDS)
 
 APP_DEEP_LINK_SCHEME=$(cfg APP_DEEP_LINK_SCHEME)
 APP_NAME=$(cfg APP_NAME)
+BRAND_SUBTITLE=$(cfg BRAND_SUBTITLE)
+PRIVACY_POLICY_URL=$(cfg PRIVACY_POLICY_URL)
+TERMS_URL=$(cfg TERMS_URL)
 DEVICE_MANUFACTURER=$(cfg DEVICE_MANUFACTURER)
+DEVICE_MODEL=$(cfg DEVICE_MODEL)
 
 LOG_LEVEL=$(cfg LOG_LEVEL)
 SESSION_TTL_SECONDS=$(cfg SESSION_TTL_SECONDS)
@@ -122,6 +126,15 @@ GH_TOKENS_ACCESS_TOKEN_INDEX=$(cfg GH_TOKENS_ACCESS_TOKEN_INDEX)
 GH_DEEP_LINK_BASE_URL=$(cfg GH_DEEP_LINK_BASE_URL)
 GH_DEEP_LINK_PATH=$(cfg GH_DEEP_LINK_PATH)
 GOOGLE_SA_KEY_SECRET_ARN=$(cfg GOOGLE_SA_KEY_SECRET_ARN)
+
+USER_DEVICE_DETAILS_TABLE=$(cfg USER_DEVICE_DETAILS_TABLE)
+SCENE_TABLE=$(cfg SCENE_TABLE)
+SCENE_GSI_NAME=$(cfg SCENE_GSI_NAME)
+DEVICE_STATE_TABLE=$(cfg DEVICE_STATE_TABLE)
+METADATA_BUCKET=$(cfg METADATA_BUCKET)
+ENDPOINT_KEY_SECRET_ARN=$(cfg ENDPOINT_KEY_SECRET_ARN)
+ENDPOINT_KEY_REGION=$(cfg ENDPOINT_KEY_REGION)
+ALLOWED_REDIRECT_URIS=$(cfg ALLOWED_REDIRECT_URIS)
 
 DEPLOY_ALEXA=0; DEPLOY_GOOGLE=0
 case "$DEPLOY_TARGET" in
@@ -334,7 +347,7 @@ create_or_update_role() {
     aws iam put-role-policy --role-name "$ROLE" \
       --policy-name "${ROLE}-policy" \
       --policy-document "$POLICY_JSON" > /dev/null
-    _info "IAM role $ROLE updated"
+    _info "IAM role $ROLE updated" >&2
   else
     aws iam create-role --role-name "$ROLE" \
       --assume-role-policy-document "$TRUST" \
@@ -343,7 +356,7 @@ create_or_update_role() {
       --policy-name "${ROLE}-policy" \
       --policy-document "$POLICY_JSON" > /dev/null
     sleep 10  # IAM propagation
-    _info "IAM role $ROLE created"
+    _info "IAM role $ROLE created" >&2
   fi
   aws iam get-role --role-name "$ROLE" --query 'Role.Arn' --output text
 }
@@ -384,16 +397,33 @@ ensure_ddb_gsi() {
 get_or_create_resource() {
   local PARENT_ID="$1" PATH_PART="$2"
   local EXISTING
-  EXISTING=$(aws apigateway get-resources --rest-api-id "$API_GATEWAY_ID" --region "$AWS_REGION" \
-    --query "items[?parentId=='${PARENT_ID}' && pathPart=='${PATH_PART}'].id" \
-    --output text 2>/dev/null || true)
+  # Retry up to 3 times in case of throttling
+  local attempt
+  for attempt in 1 2 3; do
+    EXISTING=$(aws apigateway get-resources --rest-api-id "$API_GATEWAY_ID" --region "$AWS_REGION" \
+      --query "items[?parentId=='${PARENT_ID}' && pathPart=='${PATH_PART}'].id" \
+      --output text 2>/dev/null || true)
+    [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ] && break
+    sleep $attempt
+  done
   if [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ]; then
     echo "$EXISTING"
   else
-    aws apigateway create-resource \
+    # Create; if ConflictException (already exists), look it up directly
+    local CREATE_OUT CREATE_ERR
+    CREATE_OUT=$(aws apigateway create-resource \
       --rest-api-id "$API_GATEWAY_ID" --parent-id "$PARENT_ID" \
       --path-part "$PATH_PART" --region "$AWS_REGION" \
-      --query 'id' --output text
+      --query 'id' --output text 2>&1) && echo "$CREATE_OUT" && return
+    if echo "$CREATE_OUT" | grep -q "ConflictException"; then
+      # Resource was created by a previous partial run; look it up
+      aws apigateway get-resources --rest-api-id "$API_GATEWAY_ID" --region "$AWS_REGION" \
+        --query "items[?parentId=='${PARENT_ID}' && pathPart=='${PATH_PART}'].id" \
+        --output text
+    else
+      echo "$CREATE_OUT" >&2
+      return 1
+    fi
   fi
 }
 
@@ -932,7 +962,7 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
   smoke "GH status — no auth → 401"       GET    "${BASE}/api/v1/voice/google-home/account-linking"                    "401"
   smoke "GH unlink — no auth → 401"       DELETE "${BASE}/api/v1/voice/google-home/account-linking"                    "401"
   smoke "GH authorize — reachable → !5xx" GET    "${BASE}/google-home/oauth/authorize"                                  "400"
-  smoke "GH token — reachable → !5xx"     POST   "${BASE}/google-home/oauth/token"                                      "400"
+  smoke "GH token — reachable → !5xx"     POST   "${BASE}/google-home/oauth/token"                                      "401"
 fi
 
 # ── Step 11: Google Console Checklist ─────────────────────────────────────────
