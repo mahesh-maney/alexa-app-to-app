@@ -61,6 +61,7 @@ _KEY_SECRET_ARN            = os.environ.get("ENDPOINT_KEY_SECRET_ARN", "")
 _KEY_SECRET_REGION         = os.environ.get("ENDPOINT_KEY_REGION", "eu-west-1")
 _DEVICE_MANUFACTURER       = os.environ.get("DEVICE_MANUFACTURER", "Digilux")
 _DEVICE_MODEL              = os.environ.get("DEVICE_MODEL", "Digilux Smart Device")
+_SCENE_GSI_NAME            = os.environ.get("SCENE_GSI_NAME", "GSI_scene")
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
@@ -76,10 +77,11 @@ else:
     logger.info(
         "CONFIG_OK function=google_home_fulfillment region=%s "
         "tokens_table=%s tokens_index=%s user_device_table=%s "
-        "scene_table=%s device_state_table=%s metadata_bucket=%s manufacturer=%s",
+        "scene_table=%s scene_gsi=%s device_state_table=%s metadata_bucket=%s "
+        "manufacturer=%s model=%s",
         _REGION, _TOKENS_TABLE, _TOKENS_ACCESS_TOKEN_INDEX,
-        _USER_DEVICE_TABLE, _SCENE_TABLE, _DEVICE_STATE_TABLE,
-        _METADATA_BUCKET, _DEVICE_MANUFACTURER,
+        _USER_DEVICE_TABLE, _SCENE_TABLE, _SCENE_GSI_NAME, _DEVICE_STATE_TABLE,
+        _METADATA_BUCKET, _DEVICE_MANUFACTURER, _DEVICE_MODEL,
     )
 
 # ── Device-type classification ─────────────────────────────────────────────────
@@ -586,7 +588,7 @@ def _activate_scene(user_id: str, scene_id: str) -> None:
     """Publish scene activation to IoT — same topic/payload as Alexa SceneController."""
     scene_table = _ddb().Table(_SCENE_TABLE)
     resp  = scene_table.query(
-        IndexName="GSI_scene",
+        IndexName=_SCENE_GSI_NAME,
         KeyConditionExpression=Key("sceneId").eq(str(scene_id)) & Key("userId").eq(user_id),
     )
     items = resp.get("Items", [])
