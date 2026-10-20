@@ -71,7 +71,21 @@ _TRANSACTIONS_TABLE   = os.environ.get("GH_OAUTH_TRANSACTIONS_TABLE", "google_ho
 _AUTH_CODES_TABLE     = os.environ.get("GH_AUTH_CODES_TABLE", "google_home_auth_codes")
 _AUTH_CODE_TTL_S      = int(os.environ.get("AUTH_CODE_TTL_SECONDS", "300"))
 _APP_NAME             = os.environ.get("APP_NAME", "Digilux Smart Home")
+_BRAND_TITLE          = os.environ.get("BRAND_TITLE", _APP_NAME)
 _BRAND_SUBTITLE       = os.environ.get("BRAND_SUBTITLE", "Identity Server")
+
+# ── Brand logo ─────────────────────────────────────────────────────────────────
+def _load_logo() -> str:
+    """Return base64 data URI for brand-logo.png bundled with this Lambda."""
+    _logo_path = os.path.join(os.path.dirname(__file__), "brand-logo.png")
+    try:
+        with open(_logo_path, "rb") as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+    except Exception as exc:
+        logger.warning("BRAND_LOGO_LOAD_FAILED path=%s error=%s", _logo_path, exc)
+        return ""
+
+_BRAND_LOGO_DATA_URI = _load_logo()
 _PRIVACY_POLICY_URL   = os.environ.get("PRIVACY_POLICY_URL", "https://digilux.co.in/privacy-policy.jsp")
 _TERMS_URL            = os.environ.get("TERMS_URL", "https://digilux.co.in/terms-of-use.jsp")
 
@@ -225,11 +239,13 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     The form POST goes to /google-home/oauth/consent with action=approve or action=cancel.
     """
     safe_app      = html.escape(_APP_NAME)
+    safe_title    = html.escape(_BRAND_TITLE)
     safe_subtitle = html.escape(_BRAND_SUBTITLE)
     safe_privacy  = html.escape(_PRIVACY_POLICY_URL)
     safe_terms    = html.escape(_TERMS_URL)
     safe_email    = html.escape(user_email or "your account")
     safe_state    = html.escape(state)
+    logo_uri      = _BRAND_LOGO_DATA_URI
 
     def hidden(name: str, value: str) -> str:
         return f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
@@ -253,19 +269,28 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     }}
     .brand-header {{
       padding: 20px 24px 16px;
-      border-bottom: 1px solid #e0e0e0;
+      background: #1a1a1a;
+      border-bottom: 1px solid #333;
+    }}
+    .brand-logo {{
+      max-height: 56px;
+      max-width: 100%;
+      width: auto;
+      height: auto;
+      display: block;
+      margin-bottom: 6px;
     }}
     .brand-header .brand-name {{
       font-size: 22px;
       font-weight: 900;
       letter-spacing: 1px;
-      color: #1a1a1a;
+      color: #fff;
       text-transform: uppercase;
     }}
     .brand-header .brand-sub {{
       font-size: 11px;
       letter-spacing: 2px;
-      color: #888;
+      color: #aaa;
       text-transform: uppercase;
       margin-top: 2px;
     }}
@@ -333,7 +358,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       line-height: 1.6;
       margin-bottom: 28px;
     }}
-    .privacy-text a {{ color: #1a73e8; text-decoration: underline; }}
+    .privacy-text a {{ color: #1a73e8; text-decoration: underline; cursor: pointer; }}
     .btn-row {{
       display: flex;
       gap: 12px;
@@ -358,8 +383,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 </head>
 <body>
   <div class="brand-header">
-    <div class="brand-name">{safe_app}</div>
-    <div class="brand-sub">{safe_subtitle}</div>
+    {f'<img class="brand-logo" src="{logo_uri}" alt="{safe_title}">' if logo_uri else ''}
   </div>
 
   <div class="content">
@@ -394,9 +418,9 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     <p class="privacy-text">
       You may be sharing sensitive info with this site or app. Learn about how
       your data is handled by reviewing {safe_app}'s
-      <a href="{safe_privacy}" target="_blank">Privacy Policy</a>
+      <a href="#" onclick="window.open('{safe_privacy}','_blank','noopener');return false;">Privacy Policy</a>
       and
-      <a href="{safe_terms}" target="_blank">Terms &amp; Conditions</a>.
+      <a href="#" onclick="window.open('{safe_terms}','_blank','noopener');return false;">Terms &amp; Conditions</a>.
     </p>
 
     <div class="btn-row">
@@ -412,6 +436,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       </form>
     </div>
   </div>
+
 </body>
 </html>"""
 
