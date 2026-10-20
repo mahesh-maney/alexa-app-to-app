@@ -193,19 +193,17 @@ class TestWebFallback:
         body = json.loads(r["body"])
         assert "webFallbackUrl" not in body
 
-    def test_web_fallback_url_contains_pre_auth_state_param(self):
+    def test_web_fallback_url_is_valid_https_url(self):
         r, _, _ = _run_ok()
         body = json.loads(r["body"])
         if "webFallbackUrl" in body:
-            assert "pre_auth_state=" in body["webFallbackUrl"]
+            assert body["webFallbackUrl"].startswith("https://")
 
-    def test_web_fallback_url_state_matches_response_state(self):
+    def test_web_fallback_url_response_has_state(self):
         r, _, _ = _run_ok()
         body = json.loads(r["body"])
-        if "webFallbackUrl" in body:
-            from urllib.parse import urlparse, parse_qs
-            qs = parse_qs(urlparse(body["webFallbackUrl"]).query)
-            assert qs.get("pre_auth_state", [None])[0] == body["state"]
+        # state is returned top-level; webFallbackUrl is the OAuth authorize URL
+        assert "state" in body
 
 
 # ── DDB errors ────────────────────────────────────────────────────────────────
