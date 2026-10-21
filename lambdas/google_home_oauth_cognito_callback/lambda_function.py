@@ -269,16 +269,23 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     }}
     .brand-header {{
       padding: 20px 24px 16px;
-      background: #1a1a1a;
-      border-bottom: 1px solid #333;
+      background: #fff;
+      text-align: center;
+    }}
+    .brand-header-inner {{
+      display: inline-block;
+      background: #1565C0;
+      border-radius: 8px;
+      padding: 12px 20px;
+      width: 75%;
     }}
     .brand-logo {{
-      max-height: 56px;
+      max-height: 42px;
       max-width: 100%;
       width: auto;
       height: auto;
       display: block;
-      margin-bottom: 6px;
+      margin: 0 auto;
     }}
     .brand-header .brand-name {{
       font-size: 22px;
@@ -340,11 +347,13 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       margin-bottom: 10px;
     }}
     .perm-box ul li:last-child {{ margin-bottom: 0; }}
-    .perm-box ul li svg {{
+    .perm-dot {{
       flex-shrink: 0;
-      width: 20px;
-      height: 20px;
-      color: #555;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #2e7d32;
+      display: inline-block;
     }}
     .trust-text {{
       font-size: 13px;
@@ -383,7 +392,9 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 </head>
 <body>
   <div class="brand-header">
-    {f'<img class="brand-logo" src="{logo_uri}" alt="{safe_title}">' if logo_uri else ''}
+    <div class="brand-header-inner">
+      {f'<img class="brand-logo" src="{logo_uri}" alt="{safe_title}">' if logo_uri else ''}
+    </div>
   </div>
 
   <div class="content">
@@ -398,17 +409,11 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       <div class="perm-label">Granting permission to:</div>
       <ul>
         <li>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-            <polyline points="22 4 12 14.01 9 11.01"/>
-          </svg>
+          <span class="perm-dot"></span>
           discoverdevices
         </li>
         <li>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-            <polyline points="22 4 12 14.01 9 11.01"/>
-          </svg>
+          <span class="perm-dot"></span>
           controldevices
         </li>
       </ul>
