@@ -85,7 +85,18 @@ def _load_logo() -> str:
         logger.warning("BRAND_LOGO_LOAD_FAILED path=%s error=%s", _logo_path, exc)
         return ""
 
-_BRAND_LOGO_DATA_URI = _load_logo()
+def _load_nucleus_logo() -> str:
+    """Return base64 data URI for nucleus-logo.png bundled with this Lambda."""
+    _logo_path = os.path.join(os.path.dirname(__file__), "nucleus-logo.png")
+    try:
+        with open(_logo_path, "rb") as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+    except Exception as exc:
+        logger.warning("NUCLEUS_LOGO_LOAD_FAILED path=%s error=%s", _logo_path, exc)
+        return ""
+
+_BRAND_LOGO_DATA_URI   = _load_logo()
+_NUCLEUS_LOGO_DATA_URI = _load_nucleus_logo()
 _PRIVACY_POLICY_URL   = os.environ.get("PRIVACY_POLICY_URL", "https://digilux.co.in/privacy-policy.jsp")
 _TERMS_URL            = os.environ.get("TERMS_URL", "https://digilux.co.in/terms.jsp")
 
@@ -245,7 +256,8 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     safe_terms    = html.escape(_TERMS_URL)
     safe_email    = html.escape(user_email or "your account")
     safe_state    = html.escape(state)
-    logo_uri      = _BRAND_LOGO_DATA_URI
+    logo_uri        = _BRAND_LOGO_DATA_URI
+    nucleus_logo_uri = _NUCLEUS_LOGO_DATA_URI
 
     def hidden(name: str, value: str) -> str:
         return f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
@@ -301,9 +313,20 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       text-transform: uppercase;
       margin-top: 2px;
     }}
+    .nucleus-logo-wrap {{
+      text-align: center;
+      padding: 16px 24px 0;
+    }}
+    .nucleus-logo {{
+      max-height: 64px;
+      max-width: 60%;
+      width: auto;
+      height: auto;
+      display: inline-block;
+    }}
     .content {{
       flex: 1;
-      padding: 28px 24px 24px;
+      padding: 20px 24px 24px;
     }}
     h1 {{
       font-size: 26px;
@@ -396,6 +419,8 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       {f'<img class="brand-logo" src="{logo_uri}" alt="{safe_title}">' if logo_uri else ''}
     </div>
   </div>
+
+  {f'<div class="nucleus-logo-wrap"><img class="nucleus-logo" src="{nucleus_logo_uri}" alt="Nucleus"></div>' if nucleus_logo_uri else ''}
 
   <div class="content">
     <h1>Authorization</h1>
