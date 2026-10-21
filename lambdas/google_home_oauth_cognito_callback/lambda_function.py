@@ -70,7 +70,7 @@ _COGNITO_CALLBACK_URI = os.environ.get("COGNITO_CALLBACK_URI", "")
 _TRANSACTIONS_TABLE   = os.environ.get("GH_OAUTH_TRANSACTIONS_TABLE", "google_home_oauth_transactions")
 _AUTH_CODES_TABLE     = os.environ.get("GH_AUTH_CODES_TABLE", "google_home_auth_codes")
 _AUTH_CODE_TTL_S      = int(os.environ.get("AUTH_CODE_TTL_SECONDS", "300"))
-_APP_NAME             = os.environ.get("APP_NAME", "Digilux Smart Home")
+_APP_NAME             = os.environ.get("APP_NAME", "Digilux")
 _BRAND_TITLE          = os.environ.get("BRAND_TITLE", _APP_NAME)
 _BRAND_SUBTITLE       = os.environ.get("BRAND_SUBTITLE", "Identity Server")
 
@@ -87,7 +87,7 @@ def _load_logo() -> str:
 
 _BRAND_LOGO_DATA_URI = _load_logo()
 _PRIVACY_POLICY_URL   = os.environ.get("PRIVACY_POLICY_URL", "https://digilux.co.in/privacy-policy.jsp")
-_TERMS_URL            = os.environ.get("TERMS_URL", "https://digilux.co.in/terms-of-use.jsp")
+_TERMS_URL            = os.environ.get("TERMS_URL", "https://digilux.co.in/terms.jsp")
 
 _REQUIRED_VARS = {
     "DATA_REGION":              _REGION,
@@ -416,11 +416,11 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 
     <p class="trust-text">Make sure you trust Google</p>
     <p class="privacy-text">
-      You may be sharing sensitive info with this site or app. Learn about how
-      your data is handled by reviewing {safe_app}'s
-      <a href="#" onclick="window.open('{safe_privacy}','_blank','noopener');return false;">Privacy Policy</a>
+      Before continuing, please review {safe_app}'s
+      <a href="{safe_privacy}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
       and
-      <a href="#" onclick="window.open('{safe_terms}','_blank','noopener');return false;">Terms &amp; Conditions</a>.
+      <a href="{safe_terms}" target="_blank" rel="noopener noreferrer">Terms &amp; Conditions</a>.
+      These links open separately so you can return to this consent page.
     </p>
 
     <div class="btn-row">
@@ -436,6 +436,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       </form>
     </div>
   </div>
+
 
 </body>
 </html>"""
