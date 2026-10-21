@@ -451,6 +451,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       and
       <a href="{safe_terms}" target="_blank" rel="noopener noreferrer">Terms &amp; Conditions</a>.
       These links open separately so you can return to this consent page.
+      Please use the back button to go back to the consent page.
     </p>
 
     <div class="btn-row">
