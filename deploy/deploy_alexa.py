@@ -40,7 +40,8 @@ except ImportError:
 
 REQUIRED_KEYS = [
     "AWS_REGION", "ALEXA_FULFILLMENT_REGION", "ROLE_PREFIX", "ENV_LABEL",
-    "API_GATEWAY_ID", "API_STAGE", "API_BASE_URL",
+    # API_GATEWAY_ID intentionally omitted — empty string = auto-create a new API
+    "API_STAGE", "API_BASE_URL",
     "COGNITO_USER_POOL_ID", "COGNITO_REGION", "COGNITO_CLIENT_ID",
     "ALEXA_SESSIONS_TABLE", "ALEXA_TOKENS_TABLE",
     "USER_DEVICE_MAPPING_TABLE", "USER_DEVICE_DETAILS_TABLE",
@@ -231,7 +232,12 @@ def step4_kms(session, c: dict, account_id: str) -> str:
     alias = cfg(c, "KMS_KEY_ALIAS")
     log_info(f"Looking up alias {alias} in {region}...")
 
-    aliases = kms.list_aliases().get("Aliases", [])
+    aliases = []
+    resp = kms.list_aliases()
+    aliases.extend(resp.get("Aliases", []))
+    while resp.get("NextMarker"):
+        resp = kms.list_aliases(Marker=resp["NextMarker"])
+        aliases.extend(resp.get("Aliases", []))
     match = next((a for a in aliases if a.get("AliasName") == alias), None)
     if match:
         key_id  = match["TargetKeyId"]
@@ -365,11 +371,14 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
     log_info("NOTE: alexa-fulfillment-role CW Logs permission scoped to ALEXA_FULFILLMENT_REGION"
              f" ({irl_region})")
     role_arns = {}
+    created_count = 0
     for role_name, policy in roles:
-        _, arn = ensure_role(iam, role_name, policy)
+        was_created, arn = ensure_role(iam, role_name, policy)
         role_arns[role_name] = arn
+        if was_created:
+            created_count += 1
 
-    log_ok(f"IAM roles complete  total={len(roles)}")
+    log_ok(f"IAM roles complete  total={len(roles)}  created={created_count}  updated={len(roles)-created_count}")
     return role_arns
 
 

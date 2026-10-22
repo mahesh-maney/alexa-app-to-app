@@ -273,7 +273,6 @@ def step4_apigw(session, c: dict, account_id: str) -> dict:
 def step5_iam(session, c: dict, account_id: str) -> dict:
     step_header(5, "IAM ROLES")
     iam = make_client(session, "iam")
-    prefix = cfg(c, "AWS_REGION")
     region = cfg(c, "AWS_REGION")
 
     gh_sessions   = cfg(c, "GH_SESSIONS_TABLE")
@@ -336,12 +335,14 @@ def step5_iam(session, c: dict, account_id: str) -> dict:
     ]
 
     role_arns = {}
+    created_count = 0
     for role_name, policy in roles:
-        _, arn = ensure_role(iam, role_name, policy)
+        was_created, arn = ensure_role(iam, role_name, policy)
         role_arns[role_name] = arn
+        if was_created:
+            created_count += 1
 
-    created_count = sum(1 for r, _ in roles if r not in role_arns)  # all get ARNs
-    log_ok(f"IAM roles complete  total={len(roles)}")
+    log_ok(f"IAM roles complete  total={len(roles)}  created={created_count}  updated={len(roles)-created_count}")
     return role_arns
 
 

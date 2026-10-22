@@ -78,7 +78,12 @@ def step2_preflight(session, c: dict) -> tuple:
     log_info(f"Resolving KMS alias: {alias} in {region}...")
     try:
         kms = make_client(session, "kms", region)
-        aliases = kms.list_aliases().get("Aliases", [])
+        aliases = []
+        resp = kms.list_aliases()
+        aliases.extend(resp.get("Aliases", []))
+        while resp.get("NextMarker"):
+            resp = kms.list_aliases(Marker=resp["NextMarker"])
+            aliases.extend(resp.get("Aliases", []))
         match = next((a for a in aliases if a.get("AliasName") == alias), None)
         if not match:
             log_error(f"KMS alias '{alias}' not found in {region}")
