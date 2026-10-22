@@ -100,6 +100,20 @@ _NUCLEUS_LOGO_DATA_URI = _load_nucleus_logo()
 _PRIVACY_POLICY_URL   = os.environ.get("PRIVACY_POLICY_URL", "https://digilux.co.in/privacy-policy.jsp")
 _TERMS_URL            = os.environ.get("TERMS_URL", "https://digilux.co.in/terms.jsp")
 
+# ── Consent page text (all externalised for per-deployment customisation) ──────
+_CONSENT_HEADING     = os.environ.get("CONSENT_PAGE_HEADING", "Authorization")
+_CONSENT_NOTICE      = os.environ.get("CONSENT_NOTICE_TEXT",
+    "By clicking Allow, you authorize Google to access the following information.")
+_CONSENT_PERM_LABEL  = os.environ.get("CONSENT_PERM_LABEL", "Granting permission to:")
+_CONSENT_PERMISSIONS = [
+    p.strip()
+    for p in os.environ.get("CONSENT_PERMISSIONS", "discoverdevices,controldevices").split(",")
+    if p.strip()
+]
+_CONSENT_TRUST_TEXT  = os.environ.get("CONSENT_TRUST_TEXT", "Make sure you trust Google")
+_CONSENT_DENY_LABEL  = os.environ.get("CONSENT_DENY_LABEL", "DENY")
+_CONSENT_ALLOW_LABEL = os.environ.get("CONSENT_ALLOW_LABEL", "ALLOW")
+
 _REQUIRED_VARS = {
     "DATA_REGION":              _REGION,
     "COGNITO_CLIENT_ID":        _COGNITO_CLIENT_ID,
@@ -258,6 +272,16 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
     safe_state    = html.escape(state)
     logo_uri        = _BRAND_LOGO_DATA_URI
     nucleus_logo_uri = _NUCLEUS_LOGO_DATA_URI
+    safe_heading    = html.escape(_CONSENT_HEADING)
+    safe_notice     = html.escape(_CONSENT_NOTICE)
+    safe_perm_label = html.escape(_CONSENT_PERM_LABEL)
+    safe_trust      = html.escape(_CONSENT_TRUST_TEXT)
+    safe_deny       = html.escape(_CONSENT_DENY_LABEL)
+    safe_allow      = html.escape(_CONSENT_ALLOW_LABEL)
+    perm_items      = "".join(
+        f'<li><span class="perm-dot"></span>{html.escape(p)}</li>'
+        for p in _CONSENT_PERMISSIONS
+    )
 
     def hidden(name: str, value: str) -> str:
         return f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
@@ -267,7 +291,7 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Authorization — {safe_app}</title>
+  <title>{safe_heading} — {safe_app}</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -423,28 +447,20 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
   {f'<div class="nucleus-logo-wrap"><img class="nucleus-logo" src="{nucleus_logo_uri}" alt="Nucleus"></div>' if nucleus_logo_uri else ''}
 
   <div class="content">
-    <h1>Authorization</h1>
+    <h1>{safe_heading}</h1>
 
     <div class="notice-box">
-      By clicking <strong>Allow</strong>, you authorize <strong>Google</strong> to
-      access the following information.
+      {safe_notice}
     </div>
 
     <div class="perm-box">
-      <div class="perm-label">Granting permission to:</div>
+      <div class="perm-label">{safe_perm_label}</div>
       <ul>
-        <li>
-          <span class="perm-dot"></span>
-          discoverdevices
-        </li>
-        <li>
-          <span class="perm-dot"></span>
-          controldevices
-        </li>
+        {perm_items}
       </ul>
     </div>
 
-    <p class="trust-text">Make sure you trust Google</p>
+    <p class="trust-text">{safe_trust}</p>
     <p class="privacy-text">
       Before continuing, please review {safe_app}'s
       <a href="{safe_privacy}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
@@ -457,12 +473,12 @@ def _consent_page(state: str, user_email: str, scope: str) -> str:
       <form method="POST" action="/smarthome/google-home/oauth/consent" style="flex:1">
         {hidden("state", safe_state)}
         {hidden("action", "cancel")}
-        <button type="submit" class="btn-deny" style="width:100%">DENY</button>
+        <button type="submit" class="btn-deny" style="width:100%">{safe_deny}</button>
       </form>
       <form method="POST" action="/smarthome/google-home/oauth/consent" style="flex:1">
         {hidden("state", safe_state)}
         {hidden("action", "approve")}
-        <button type="submit" class="btn-allow" style="width:100%">ALLOW</button>
+        <button type="submit" class="btn-allow" style="width:100%">{safe_allow}</button>
       </form>
     </div>
   </div>
