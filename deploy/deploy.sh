@@ -126,6 +126,17 @@ GOOGLE_SA_KEY_SECRET_ARN=$(cfg GOOGLE_SA_KEY_SECRET_ARN)
 GH_SA_SECRET_ARN=$(cfg GH_SA_SECRET_ARN)
 GH_SA_SECRET_REGION=$(cfg GH_SA_SECRET_REGION)
 
+USER_DEVICE_MAPPING_TABLE=$(cfg USER_DEVICE_MAPPING_TABLE)
+ALEXA_SESSION_TTL_SECONDS=$(cfg ALEXA_SESSION_TTL_SECONDS)
+CREATE_UPDATE_FN=$(cfg CREATE_UPDATE_FN)
+LWA_TOKEN_URL=$(cfg LWA_TOKEN_URL)
+LWA_REVOKE_URL=$(cfg LWA_REVOKE_URL)
+SKILL_ENABLEMENT_URL=$(cfg SKILL_ENABLEMENT_URL)
+ALEXA_GATEWAY_URL=$(cfg ALEXA_GATEWAY_URL)
+IOT_DATA_ENDPOINT=$(cfg IOT_DATA_ENDPOINT)
+DEVICE_TABLE_SECRET_ARN=$(cfg DEVICE_TABLE_SECRET_ARN)
+DEVICE_TABLE_SECRET_REGION=$(cfg DEVICE_TABLE_SECRET_REGION)
+
 USER_DEVICE_DETAILS_TABLE=$(cfg USER_DEVICE_DETAILS_TABLE)
 DEVICE_STATE_TABLE=$(cfg DEVICE_STATE_TABLE)
 SCENE_TABLE=$(cfg SCENE_TABLE)
@@ -209,6 +220,7 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
   validate_required "GH_SESSIONS_TABLE"    "$GH_SESSIONS_TABLE"
   validate_required "GH_AUTH_CODES_TABLE"  "$GH_AUTH_CODES_TABLE"
   validate_required "GH_TOKENS_TABLE"      "$GH_TOKENS_TABLE"
+  validate_required "USER_DEVICE_MAPPING_TABLE" "$USER_DEVICE_MAPPING_TABLE"
   validate_required "USER_DEVICE_DETAILS_TABLE" "$USER_DEVICE_DETAILS_TABLE"
   validate_required "METADATA_BUCKET"           "$METADATA_BUCKET"
   validate_required "ENDPOINT_KEY_SECRET_ARN"   "$ENDPOINT_KEY_SECRET_ARN"
@@ -573,6 +585,7 @@ _section "STEP 6a — ALEXA IAM ROLES"
 
 DDB_SESSIONS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${ALEXA_SESSIONS_TABLE}"
 DDB_TOKENS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${ALEXA_TOKENS_TABLE}"
+DDB_DEVICE_MAPPING_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${USER_DEVICE_MAPPING_TABLE}"
 
 ROLE_START_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-start-role" "{
   \"Version\":\"2012-10-17\",\"Statement\":[
@@ -616,6 +629,39 @@ ROLE_STATUS_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-status-role" "{
   ]
 }")
 
+ROLE_SKILL_EVT_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-skill-evt-role" "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"${DDB_TOKENS_ARN}\"},
+    {\"Sid\":\"DeviceMapping\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_DEVICE_MAPPING_ARN}\",\"${DDB_DEVICE_MAPPING_ARN}/index/*\"]},
+    {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+  ]
+}")
+
+ROLE_STATE_REPORTER_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-state-reporter-role" "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\"],\"Resource\":\"${DDB_TOKENS_ARN}\"},
+    {\"Sid\":\"UserDevices\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_USER_DEVICE_DETAILS_ARN}\",\"${DDB_USER_DEVICE_DETAILS_ARN}/index/*\"]},
+    {\"Sid\":\"Metadata\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"${S3_METADATA_ARN}\",\"${S3_METADATA_ARN}/*\"]},
+    {\"Sid\":\"EndpointKey\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${ENDPOINT_KEY_SECRET_ARN}\"},
+    {\"Sid\":\"LwaSecret\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${LWA_SECRET_ARN}\"},
+    {\"Sid\":\"DeviceStateStream\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetRecords\",\"dynamodb:GetShardIterator\",\"dynamodb:DescribeStream\",\"dynamodb:ListStreams\"],\"Resource\":\"${DDB_DEVICE_STATE_ARN}/stream/*\"},
+    {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+  ]
+}")
+
+ROLE_PROACTIVE_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-proactive-role" "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\"],\"Resource\":\"${DDB_TOKENS_ARN}\"},
+    {\"Sid\":\"UserDevices\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_USER_DEVICE_DETAILS_ARN}\",\"${DDB_USER_DEVICE_DETAILS_ARN}/index/*\"]},
+    {\"Sid\":\"Scenes\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_SCENE_ARN}\",\"${DDB_SCENE_ARN}/index/*\"]},
+    {\"Sid\":\"Metadata\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"${S3_METADATA_ARN}\",\"${S3_METADATA_ARN}/*\"]},
+    {\"Sid\":\"EndpointKey\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${ENDPOINT_KEY_SECRET_ARN}\"},
+    {\"Sid\":\"LwaSecret\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${LWA_SECRET_ARN}\"},
+    {\"Sid\":\"UserDeviceStream\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetRecords\",\"dynamodb:GetShardIterator\",\"dynamodb:DescribeStream\",\"dynamodb:ListStreams\"],\"Resource\":\"${DDB_USER_DEVICE_DETAILS_ARN}/stream/*\"},
+    {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+  ]
+}")
+
 # ── Step 7a: Package + Deploy Lambdas ─────────────────────────────────────────
 _section "STEP 7a — ALEXA LAMBDA DEPLOY"
 
@@ -634,7 +680,7 @@ deploy_lambda "alexa_app_to_app_link" "$ZIP" "$ROLE_START_ARN" \
     "REDIRECT_URI=${ALEXA_REDIRECT_URI}" \
     "ALLOWED_REDIRECT_HOSTS=${ALEXA_REDIRECT_HOSTS}" \
     "KMS_KEY_ARN=${KMS_KEY_ARN}" \
-    "SESSION_TTL_SECONDS=${SESSION_TTL_SECONDS}")" 15
+    "SESSION_TTL_SECONDS=${ALEXA_SESSION_TTL_SECONDS}")" 15
 
 ZIP=$(package_lambda "alexa_complete_app_to_app" "${LAMBDA_DIR}/alexa_complete_app_to_app")
 deploy_lambda "alexa_complete_app_to_app" "$ZIP" "$ROLE_COMPLETE_ARN" \
@@ -646,12 +692,16 @@ deploy_lambda "alexa_complete_app_to_app" "$ZIP" "$ROLE_COMPLETE_ARN" \
     "KMS_KEY_ARN=${KMS_KEY_ARN}" \
     "ALEXA_SKILL_ID=${ALEXA_SKILL_ID}" \
     "ALEXA_SKILL_STAGE=${ALEXA_SKILL_STAGE}" \
-    "REDIRECT_URI=${ALEXA_REDIRECT_URI}")" 30
+    "REDIRECT_URI=${ALEXA_REDIRECT_URI}" \
+    "USER_DEVICE_MAPPING_TABLE=${USER_DEVICE_MAPPING_TABLE}" \
+    "CREATE_UPDATE_FN=${CREATE_UPDATE_FN}" \
+    "LWA_TOKEN_URL=${LWA_TOKEN_URL}" \
+    "LWA_REVOKE_URL=${LWA_REVOKE_URL}")" 30
 
 ZIP=$(package_lambda "alexa_server_callback" "${LAMBDA_DIR}/alexa_server_callback")
 deploy_lambda "alexa_server_callback" "$ZIP" "$ROLE_CALLBACK_ARN" \
   "$(env_json "${ALEXA_COMMON[@]}" \
-    "APP_DEEP_LINK_SCHEME=${APP_DEEP_LINK_SCHEME}")" 10
+    "APP_SCHEME=${APP_DEEP_LINK_SCHEME}")" 10
 
 ZIP=$(package_lambda "alexa_app_to_app_unlink" "${LAMBDA_DIR}/alexa_app_to_app_unlink")
 deploy_lambda "alexa_app_to_app_unlink" "$ZIP" "$ROLE_UNLINK_ARN" \
@@ -661,7 +711,11 @@ deploy_lambda "alexa_app_to_app_unlink" "$ZIP" "$ROLE_UNLINK_ARN" \
     "LWA_SECRET_ARN=${LWA_SECRET_ARN}" \
     "LWA_SECRET_REGION=${LWA_SECRET_REGION}" \
     "KMS_KEY_ARN=${KMS_KEY_ARN}" \
-    "ALEXA_SKILL_ID=${ALEXA_SKILL_ID}")" 15
+    "ALEXA_SKILL_ID=${ALEXA_SKILL_ID}" \
+    "USER_DEVICE_MAPPING_TABLE=${USER_DEVICE_MAPPING_TABLE}" \
+    "CREATE_UPDATE_FN=${CREATE_UPDATE_FN}" \
+    "LWA_REVOKE_URL=${LWA_REVOKE_URL}" \
+    "SKILL_ENABLEMENT_URL=${SKILL_ENABLEMENT_URL}")" 15
 
 ZIP=$(package_lambda "alexa_link_status" "${LAMBDA_DIR}/alexa_link_status")
 deploy_lambda "alexa_link_status" "$ZIP" "$ROLE_STATUS_ARN" \
@@ -671,6 +725,13 @@ deploy_lambda "alexa_link_status" "$ZIP" "$ROLE_STATUS_ARN" \
     "LWA_SECRET_ARN=${LWA_SECRET_ARN}" \
     "LWA_SECRET_REGION=${LWA_SECRET_REGION}" \
     "KMS_KEY_ARN=${KMS_KEY_ARN}")" 15
+
+ZIP=$(package_lambda "alexa_skill_server_events" "${LAMBDA_DIR}/alexa_skill_server_events")
+deploy_lambda "alexa_skill_server_events" "$ZIP" "$ROLE_SKILL_EVT_ARN" \
+  "$(env_json "${ALEXA_COMMON[@]}" \
+    "LWA_TOKENS_TABLE=${ALEXA_TOKENS_TABLE}" \
+    "USER_DEVICE_MAPPING_TABLE=${USER_DEVICE_MAPPING_TABLE}" \
+    "ALEXA_SKILL_ID=${ALEXA_SKILL_ID}")" 15
 
 # ── Step 8a: API Gateway Routes ───────────────────────────────────────────────
 _section "STEP 8a — ALEXA API GATEWAY ROUTES"
@@ -704,8 +765,13 @@ if [ -d "$ALEXA_FULFILLMENT_SRC" ]; then
   ROLE_FULFILLMENT_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-fulfillment-role" "{
     \"Version\":\"2012-10-17\",\"Statement\":[
       {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${ALEXA_TOKENS_TABLE}\"},
-      {\"Sid\":\"Secret\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${LWA_SECRET_ARN}\"},
+      {\"Sid\":\"UserDevices\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_USER_DEVICE_DETAILS_ARN}\",\"${DDB_USER_DEVICE_DETAILS_ARN}/index/*\"]},
+      {\"Sid\":\"DeviceState\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_DEVICE_STATE_ARN}\",\"${DDB_DEVICE_STATE_ARN}/index/*\"]},
+      {\"Sid\":\"Scenes\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_SCENE_ARN}\",\"${DDB_SCENE_ARN}/index/*\"]},
+      {\"Sid\":\"Metadata\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"${S3_METADATA_ARN}\",\"${S3_METADATA_ARN}/*\"]},
+      {\"Sid\":\"Secrets\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":[\"${LWA_SECRET_ARN}\",\"${ENDPOINT_KEY_SECRET_ARN}\",\"${DEVICE_TABLE_SECRET_ARN}\"]},
       {\"Sid\":\"Kms\",\"Effect\":\"Allow\",\"Action\":[\"kms:Decrypt\"],\"Resource\":\"${KMS_KEY_ARN}\"},
+      {\"Sid\":\"IoTPublish\",\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\"],\"Resource\":\"arn:aws:iot:${AWS_REGION}:${ACCOUNT_ID}:topic/iot/device/*\"},
       {\"Sid\":\"Logs\",${FULFILLMENT_LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
     ]
   }")
@@ -720,7 +786,17 @@ if [ -d "$ALEXA_FULFILLMENT_SRC" ]; then
       "LWA_SECRET_REGION=${LWA_SECRET_REGION}" \
       "KMS_KEY_ARN=${KMS_KEY_ARN}" \
       "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}" \
-      "COGNITO_REGION=${COGNITO_REGION}")" \
+      "COGNITO_REGION=${COGNITO_REGION}" \
+      "USER_DEVICE_DETAILS_TABLE=${USER_DEVICE_DETAILS_TABLE}" \
+      "DEVICE_STATE_TABLE=${DEVICE_STATE_TABLE}" \
+      "SCENE_TABLE=${SCENE_TABLE}" \
+      "METADATA_BUCKET=${METADATA_BUCKET}" \
+      "ENDPOINT_KEY_SECRET_ARN=${ENDPOINT_KEY_SECRET_ARN}" \
+      "ENDPOINT_KEY_REGION=${ENDPOINT_KEY_REGION}" \
+      "DEVICE_TABLE_SECRET_ARN=${DEVICE_TABLE_SECRET_ARN}" \
+      "DEVICE_TABLE_SECRET_REGION=${DEVICE_TABLE_SECRET_REGION}" \
+      "ALEXA_GATEWAY_URL=${ALEXA_GATEWAY_URL}" \
+      "IOT_DATA_ENDPOINT=${IOT_DATA_ENDPOINT}")" \
     30 "$ALEXA_FULFILLMENT_REGION"
 
   _warn "Register this Lambda ARN in the Alexa Developer Console as the skill endpoint:"
@@ -732,6 +808,35 @@ else
   _info "Current fulfillment Lambda ARN (if already deployed):"
   _info "  arn:aws:lambda:${ALEXA_FULFILLMENT_REGION}:${ACCOUNT_ID}:function:alexa_fulfillment"
 fi
+
+ZIP=$(package_lambda "alexa_state_reporter" "${LAMBDA_DIR}/alexa_state_reporter")
+deploy_lambda "alexa_state_reporter" "$ZIP" "$ROLE_STATE_REPORTER_ARN" \
+  "$(env_json \
+    "DATA_REGION=${AWS_REGION}" \
+    "LOG_LEVEL=${LOG_LEVEL}" \
+    "LWA_TOKENS_TABLE=${ALEXA_TOKENS_TABLE}" \
+    "LWA_SECRET_ARN=${LWA_SECRET_ARN}" \
+    "LWA_SECRET_REGION=${LWA_SECRET_REGION}" \
+    "USER_DEVICE_DETAILS_TABLE=${USER_DEVICE_DETAILS_TABLE}" \
+    "METADATA_BUCKET=${METADATA_BUCKET}" \
+    "ENDPOINT_KEY_SECRET_ARN=${ENDPOINT_KEY_SECRET_ARN}" \
+    "ENDPOINT_KEY_REGION=${ENDPOINT_KEY_REGION}" \
+    "ALEXA_GATEWAY_URL=${ALEXA_GATEWAY_URL}")" 30
+
+ZIP=$(package_lambda "alexa_proactive_discovery" "${LAMBDA_DIR}/alexa_proactive_discovery")
+deploy_lambda "alexa_proactive_discovery" "$ZIP" "$ROLE_PROACTIVE_ARN" \
+  "$(env_json \
+    "DATA_REGION=${AWS_REGION}" \
+    "LOG_LEVEL=${LOG_LEVEL}" \
+    "LWA_TOKENS_TABLE=${ALEXA_TOKENS_TABLE}" \
+    "LWA_SECRET_ARN=${LWA_SECRET_ARN}" \
+    "LWA_SECRET_REGION=${LWA_SECRET_REGION}" \
+    "USER_DEVICE_DETAILS_TABLE=${USER_DEVICE_DETAILS_TABLE}" \
+    "SCENE_TABLE=${SCENE_TABLE}" \
+    "METADATA_BUCKET=${METADATA_BUCKET}" \
+    "ENDPOINT_KEY_SECRET_ARN=${ENDPOINT_KEY_SECRET_ARN}" \
+    "ENDPOINT_KEY_REGION=${ENDPOINT_KEY_REGION}" \
+    "ALEXA_GATEWAY_URL=${ALEXA_GATEWAY_URL}")" 30
 
 fi  # end DEPLOY_ALEXA
 
