@@ -372,3 +372,111 @@ Method wiring: same idempotent put_method + put_integration + CORS pattern as de
 - **KMS key**: never deleted — safe to re-run
 - **IAM roles**: `put_role_policy` overwrites existing policy
 - **This script never deletes anything**
+
+---
+
+## Logging Specification
+
+### Format
+
+Every log line is printed to stdout with a consistent prefix:
+
+```
+[HH:MM:SS] [LEVEL]  [STEP X — STEP NAME]  message
+```
+
+### Log Levels
+
+| Level | Meaning |
+|-------|---------|
+| `INFO` | Normal progress — a check is starting or an operation is in progress |
+| `OK` | Step succeeded or resource already in desired state |
+| `SKIP` | Resource already exists — no action taken (idempotency) |
+| `CREATE` | Resource did not exist — creating it now |
+| `UPDATE` | Resource exists — updating it |
+| `WARN` | Non-fatal — deployment continues but attention needed |
+| `ERROR` | Fatal — deployment stops, full exception printed |
+
+### Per-Step Log Detail
+
+**Step 1 — Config:**
+- Config file path, ENV_LABEL, AWS_REGION, ALEXA_FULFILLMENT_REGION
+- Each required key check: PASS/FAIL per key
+
+**Step 2 — Preflight:**
+- AWS account ID confirmed
+- LWA secret ARN accessibility result
+- ALEXA_FULFILLMENT_REGION connectivity confirmed
+
+**Step 3 — DDB Tables:**
+- Per table: "Checking {table}…" → "already exists / creating…"
+- Waiter log: "Waiting for table to become ACTIVE…" → "ACTIVE"
+- Final count: "DDB: 2 tables OK"
+
+**Step 4 — KMS Key:**
+- "Looking up alias {KMS_KEY_ALIAS} in {AWS_REGION}…"
+- "Alias found → KeyId={id}  KeyArn={arn}" OR "Alias not found — creating new KMS key…"
+- If creating: "Key created  KeyId={id}" → "Alias created" → "KMS_KEY_ARN={arn}"
+
+**Step 5 — API Gateway:**
+- API GW ID, Cognito authorizer ID
+- resource tree nodes created/found
+
+**Step 6 — IAM Roles:**
+- Per role: "Checking {role_name}…" → "exists — updating policy / not found — creating…"
+- After new create: "Sleeping 10s for IAM propagation…"
+- Role ARN printed after each operation
+- Special note when creating `alexa-fulfillment-role`: "CloudWatch Logs permission scoped to ALEXA_FULFILLMENT_REGION ({eu-west-1})"
+
+**Step 7 — Package Lambdas:**
+- Per Lambda: "Packaging {name} from lambdas/{dir}/…"
+- If requirements.txt: "Installing Python deps (pip manylinux)…" → size
+- "Zip ready: {path}  ({size} KB)"
+- Clearly labels `alexa_fulfillment`: "  [IRELAND LAMBDA] alexa_fulfillment — will deploy to {ALEXA_FULFILLMENT_REGION}"
+
+**Step 8 — Deploy Lambdas:**
+- For each of the 8 `AWS_REGION` Lambdas:
+  - "Deploying {name} → {AWS_REGION}  timeout={t}s  memory={m}MB"
+  - "exists — uploading code…" / "not found — creating…"
+  - "Waiting for update…" / "Waiting for activation…"
+  - "Lambda {name} ready  arn={arn}"
+- Special separator before Ireland Lambda:
+  ```
+  [HH:MM:SS] [INFO]  [STEP 8 — LAMBDA DEPLOY]  ── Ireland Lambda ──────────────────────────
+  [HH:MM:SS] [INFO]  [STEP 8 — LAMBDA DEPLOY]  Deploying alexa_fulfillment → eu-west-1  timeout=30s  memory=256MB
+  [HH:MM:SS] [INFO]  [STEP 8 — LAMBDA DEPLOY]  NOTE: DATA_REGION=ap-south-1 (DDB lives in main region, not Ireland)
+  ```
+- Final count: "Lambdas deployed: 9/9  (8 × {AWS_REGION}, 1 × eu-west-1)"
+
+**Step 9 — API GW Routes:**
+- Per resource: "Resource {path} — found {id} / creating…"
+- Per method: "Wiring {METHOD} {path} → {lambda}  auth={type}"
+- Note on fulfillment: "alexa_fulfillment NOT wired to API GW — called directly by Alexa backend"
+- Final count: "Routes wired: 6 methods on 6 resources"
+
+**Step 10 — API GW Stage Deploy:**
+- "Deploying stage '{API_STAGE}'…" → "deployed  deployment_id={id}"
+
+**Step 11 — Smoke Tests:**
+- Per test: "{METHOD} {url} → HTTP {actual}  [PASS / FAIL]"
+- Final: "Smoke tests: 5/5 passed"
+
+**Step 12 — Post-Deploy Instructions:**
+- DDB stream commands for alexa_state_reporter + alexa_proactive_discovery (exact CLI printed)
+- Alexa Smart Home trigger command for alexa_fulfillment in eu-west-1 (exact CLI printed)
+- Alexa Developer Console registration instructions
+
+**Final Summary:**
+```
+[HH:MM:SS] [OK]    [SUMMARY]  deploy_alexa.py completed  env=honeywell-prod
+[HH:MM:SS] [INFO]  [SUMMARY]  Duration: 4m 12s
+[HH:MM:SS] [INFO]  [SUMMARY]  Resources:
+[HH:MM:SS] [INFO]  [SUMMARY]    DDB tables  : 2 (1 created, 1 already existed)
+[HH:MM:SS] [INFO]  [SUMMARY]    KMS key     : 1 (already existed)
+[HH:MM:SS] [INFO]  [SUMMARY]    IAM roles   : 9 (2 created, 7 updated)
+[HH:MM:SS] [INFO]  [SUMMARY]    Lambdas     : 9 (8 × ap-south-1, 1 × eu-west-1)
+[HH:MM:SS] [INFO]  [SUMMARY]    API GW      : 6 routes wired, stage deployed
+[HH:MM:SS] [INFO]  [SUMMARY]    Smoke tests : 5/5 passed
+```
+
+**On ERROR:** Full exception traceback + exact AWS API error message printed. Deployment halts immediately.

@@ -454,3 +454,133 @@ Prints exact values to configure in Google Home Developer Console:
 - **API GW**: methods are overwritten with `put_method`/`put_integration` — no routes are deleted
 
 **This script never deletes anything.** All operations are additive or update-in-place.
+
+---
+
+## Logging Specification
+
+### Format
+
+Every log line is printed to stdout with a consistent prefix:
+
+```
+[HH:MM:SS] [LEVEL]  [STEP X — STEP NAME]  message
+```
+
+Examples:
+```
+[14:32:01] [INFO]   [STEP 1 — CONFIG]      Loaded config: deploy/env.honeywell.prod.json
+[14:32:01] [INFO]   [STEP 1 — CONFIG]      ENV_LABEL=honeywell-prod  AWS_REGION=eu-west-1
+[14:32:01] [OK]     [STEP 1 — CONFIG]      No FILL_IN placeholders found
+[14:32:02] [INFO]   [STEP 2 — PREFLIGHT]   Checking AWS credentials...
+[14:32:02] [OK]     [STEP 2 — PREFLIGHT]   AWS credentials valid  account=123456789012  region=eu-west-1
+[14:32:03] [INFO]   [STEP 3 — DDB]         Checking table: google_home_link_sessions
+[14:32:03] [SKIP]   [STEP 3 — DDB]         Table google_home_link_sessions already exists — skipping create
+[14:32:03] [INFO]   [STEP 3 — DDB]         Checking table: google_home_auth_codes
+[14:32:04] [CREATE] [STEP 3 — DDB]         Table google_home_auth_codes not found — creating...
+[14:32:06] [OK]     [STEP 3 — DDB]         Table google_home_auth_codes created  pk=code  billing=PAY_PER_REQUEST
+[14:32:06] [INFO]   [STEP 3 — DDB]         Enabling TTL on google_home_auth_codes (attribute: ttl)
+[14:32:07] [OK]     [STEP 3 — DDB]         TTL enabled on google_home_auth_codes
+[14:32:07] [INFO]   [STEP 3 — DDB]         Checking GSI: accessToken-index on google_home_tokens
+[14:32:07] [SKIP]   [STEP 3 — DDB]         GSI accessToken-index already exists — skipping
+```
+
+### Log Levels
+
+| Level | Meaning |
+|-------|---------|
+| `INFO` | Normal progress — a check is starting or an operation is in progress |
+| `OK` | Step succeeded or resource already in desired state |
+| `SKIP` | Resource already exists and is correct — no action taken (idempotency) |
+| `CREATE` | Resource did not exist — creating it now |
+| `UPDATE` | Resource exists — updating it |
+| `WARN` | Non-fatal issue — deployment continues but attention may be needed |
+| `ERROR` | Fatal error — deployment stops, full exception printed |
+
+### Per-Step Log Detail
+
+**Step 1 — Config:**
+- Config file path
+- Key values: ENV_LABEL, AWS_REGION, ROLE_PREFIX, API_BASE_URL
+- Computed values: COGNITO_CALLBACK_URI, ALLOWED_REDIRECT_URIS
+- List of all required keys checked with PASS/FAIL per key
+
+**Step 2 — Preflight:**
+- AWS account ID and region confirmed
+- Each secret ARN accessibility check (name printed on success)
+- Critical warning about Google client_secret mismatch risk (printed in yellow/WARN)
+
+**Step 3 — DDB Tables:**
+- For each table: "Checking…" → "already exists / creating…"
+- For each create: "Waiting for table to become ACTIVE…" → "Table ACTIVE"
+- For each GSI: "Checking GSI {name}…" → "exists / adding…"
+- Final count: "DDB: 4 tables OK, 2 GSIs OK"
+
+**Step 4 — API Gateway:**
+- API GW ID being used
+- Cognito authorizer ID (found or created)
+- ROOT_ID captured
+
+**Step 5 — IAM Roles:**
+- For each role: "Checking role {name}…" → "exists — updating policy / not found — creating role + policy"
+- After first-time create: "Sleeping 10s for IAM propagation…"
+- Role ARN printed after each create/update
+
+**Step 6 — Package Lambdas:**
+- For each Lambda: "Packaging {name} from {source_dir}…"
+- If requirements.txt: "Installing dependencies (pip)…" → "Dependencies installed: {size}"
+- "Zip created: /tmp/…/{name}.zip  ({size} KB)"
+- Total package time per Lambda
+
+**Step 7 — Deploy Lambdas:**
+- For each Lambda:
+  - "Deploying {name} → {region}  timeout={t}s  memory={m}MB"
+  - "Function exists — uploading new code…" or "Function not found — creating…"
+  - "Waiting for update to complete…" (shown while waiter is polling)
+  - "Updating configuration (env vars, role, timeout)…"
+  - "Waiting for configuration update…"
+  - "Lambda {name} deployed  region={region}  arn={arn}"
+- At the end of all Lambdas: "Lambdas deployed: 9/9"
+
+**Step 8 — API GW Routes:**
+- For each resource node: "Resource {path} — exists ({id}) / creating under {parent_id}…"
+- For each method: "Wiring {METHOD} {path} → {lambda_name}  auth={auth_type}"
+- "Lambda invoke permission granted"
+- "CORS OPTIONS added"
+- Final count: "Routes wired: 10 methods on 8 resources"
+
+**Step 9 — API GW Stage Deploy:**
+- "Deploying stage '{API_STAGE}' on API {API_GATEWAY_ID}…"
+- "Stage deployed  deployment_id={id}"
+- "Sleeping 5s for cold-start readiness…"
+
+**Step 10 — Smoke Tests:**
+- For each test: "{METHOD} {url} → HTTP {actual}  expected={expected}  [PASS / FAIL]"
+- Final count: "Smoke tests: 7 passed, 0 failed"
+
+**Step 11 — Console Checklist:**
+- Full checklist block printed with exact URLs and values for this deployment
+
+**Final Summary:**
+```
+[14:35:22] [INFO]   [SUMMARY]  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[14:35:22] [OK]     [SUMMARY]  deploy_google.py completed  env=honeywell-prod
+[14:35:22] [INFO]   [SUMMARY]  Duration: 3m 21s
+[14:35:22] [INFO]   [SUMMARY]  Resources:
+[14:35:22] [INFO]   [SUMMARY]    DDB tables  : 4 (2 created, 2 already existed)
+[14:35:22] [INFO]   [SUMMARY]    IAM roles   : 9 (3 created, 6 updated)
+[14:35:22] [INFO]   [SUMMARY]    Lambdas     : 9 (9 deployed to ap-south-1)
+[14:35:22] [INFO]   [SUMMARY]    API GW      : 10 routes wired, stage deployed
+[14:35:22] [INFO]   [SUMMARY]    Smoke tests : 7/7 passed
+[14:35:22] [INFO]   [SUMMARY]  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**On any ERROR:**
+```
+[14:33:45] [ERROR]  [STEP 7 — LAMBDA DEPLOY]  Failed to deploy google_home_fulfillment
+[14:33:45] [ERROR]  [STEP 7 — LAMBDA DEPLOY]  Exception: An error occurred (AccessDeniedException) ...
+[14:33:45] [ERROR]  [STEP 7 — LAMBDA DEPLOY]  Traceback (most recent call last): ...
+[14:33:45] [ERROR]  [SUMMARY]  Deployment FAILED at step 7.  Resources deployed before failure are left in place.
+```
+
+Full Python exception traceback is always printed on error so the exact AWS API error message is visible.

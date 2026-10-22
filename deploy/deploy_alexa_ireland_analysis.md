@@ -297,3 +297,119 @@ MANUAL STEPS (must be done once per new account):
 | Re-deploying all Alexa Lambdas after a bulk code change | `deploy_alexa.py` |
 | Honeywell go-live: deploy Alexa stack fresh | `deploy_alexa.py` |
 | Hotfix to fulfillment only, don't want to re-deploy 8 other Lambdas | `deploy_alexa_ireland.py` |
+
+---
+
+## Logging Specification
+
+### Format
+
+Every log line is printed to stdout with a consistent prefix:
+
+```
+[HH:MM:SS] [LEVEL]  [STEP X — STEP NAME]  message
+```
+
+### Log Levels
+
+| Level | Meaning |
+|-------|---------|
+| `INFO` | Normal progress — a check is starting or in progress |
+| `OK` | Step succeeded |
+| `SKIP` | Resource already in desired state — no action taken |
+| `CREATE` | Resource did not exist — creating now |
+| `UPDATE` | Resource exists — updating |
+| `WARN` | Non-fatal — continues but needs attention |
+| `ERROR` | Fatal — stops immediately, full exception printed |
+
+### Per-Step Log Detail
+
+**Step 1 — Config:**
+```
+[14:32:00] [INFO]  [STEP 1 — CONFIG]  Loaded: deploy/env.honeywell.prod.json
+[14:32:00] [INFO]  [STEP 1 — CONFIG]  ENV_LABEL=honeywell-prod
+[14:32:00] [INFO]  [STEP 1 — CONFIG]  AWS_REGION=eu-west-1  (main region — DDB lives here)
+[14:32:00] [INFO]  [STEP 1 — CONFIG]  ALEXA_FULFILLMENT_REGION=eu-west-1  (Ireland — Lambda deploys here)
+[14:32:00] [INFO]  [STEP 1 — CONFIG]  Checking required keys...
+[14:32:00] [OK]    [STEP 1 — CONFIG]  All required config keys present
+```
+
+**Step 2 — Preflight:**
+```
+[14:32:01] [INFO]  [STEP 2 — PREFLIGHT]  Verifying AWS credentials...
+[14:32:01] [OK]    [STEP 2 — PREFLIGHT]  Credentials valid  account=123456789012
+[14:32:01] [INFO]  [STEP 2 — PREFLIGHT]  Resolving KMS alias: alias/honeywell-alexa-tokens in eu-west-1...
+[14:32:02] [OK]    [STEP 2 — PREFLIGHT]  KMS alias found  KeyArn=arn:aws:kms:eu-west-1:…
+[14:32:02] [INFO]  [STEP 2 — PREFLIGHT]  Checking ALEXA_FULFILLMENT_REGION (eu-west-1) connectivity...
+[14:32:02] [OK]    [STEP 2 — PREFLIGHT]  eu-west-1 reachable
+[14:32:02] [INFO]  [STEP 2 — PREFLIGHT]  Checking Lambda source: lambdas/alexa_fulfillment/
+[14:32:02] [OK]    [STEP 2 — PREFLIGHT]  Source directory found
+```
+If KMS alias not found:
+```
+[14:32:02] [ERROR] [STEP 2 — PREFLIGHT]  KMS alias 'alias/honeywell-alexa-tokens' not found in eu-west-1
+[14:32:02] [ERROR] [STEP 2 — PREFLIGHT]  The KMS key is created by deploy_alexa.py — run that first
+[14:32:02] [ERROR] [SUMMARY]             Deployment aborted at preflight.
+```
+
+**Step 3 — IAM Role:**
+```
+[14:32:03] [INFO]  [STEP 3 — IAM ROLE]  Checking role: honeywell-alexa-fulfillment-role
+[14:32:03] [SKIP]  [STEP 3 — IAM ROLE]  Role exists — updating inline policy
+[14:32:03] [INFO]  [STEP 3 — IAM ROLE]  Policy covers: DDB(eu-west-1), S3, SecretsManager, KMS, IoT, CWLogs(eu-west-1), XRay
+[14:32:04] [OK]    [STEP 3 — IAM ROLE]  Role policy updated  arn=arn:aws:iam::…:role/honeywell-alexa-fulfillment-role
+```
+If role is new:
+```
+[14:32:03] [CREATE][STEP 3 — IAM ROLE]  Role not found — creating honeywell-alexa-fulfillment-role...
+[14:32:04] [OK]    [STEP 3 — IAM ROLE]  Role created
+[14:32:04] [INFO]  [STEP 3 — IAM ROLE]  Sleeping 10s for IAM propagation...
+```
+
+**Step 4 — Package Lambda:**
+```
+[14:32:14] [INFO]  [STEP 4 — PACKAGE]  Packaging alexa_fulfillment from lambdas/alexa_fulfillment/
+[14:32:14] [INFO]  [STEP 4 — PACKAGE]  requirements.txt found — installing Python deps...
+[14:32:14] [INFO]  [STEP 4 — PACKAGE]  pip install (manylinux wheels, python 3.12)...
+[14:32:22] [OK]    [STEP 4 — PACKAGE]  Deps installed  size=18 MB
+[14:32:22] [INFO]  [STEP 4 — PACKAGE]  Creating zip...
+[14:32:23] [OK]    [STEP 4 — PACKAGE]  Zip ready: /tmp/deploy_build_honeywell-prod_ireland/alexa_fulfillment.zip  (19.2 MB)
+```
+
+**Step 5 — Deploy Lambda:**
+```
+[14:32:23] [INFO]  [STEP 5 — DEPLOY]   Deploying alexa_fulfillment to eu-west-1
+[14:32:23] [INFO]  [STEP 5 — DEPLOY]   timeout=30s  memory=256MB  runtime=python3.12
+[14:32:23] [INFO]  [STEP 5 — DEPLOY]   NOTE: DATA_REGION=ap-south-1 — DDB tables live in main region
+[14:32:23] [INFO]  [STEP 5 — DEPLOY]   Checking if function exists in eu-west-1...
+[14:32:24] [UPDATE][STEP 5 — DEPLOY]   Function exists — uploading new code...
+[14:32:38] [INFO]  [STEP 5 — DEPLOY]   Waiting for code update to complete...
+[14:32:41] [OK]    [STEP 5 — DEPLOY]   Code updated
+[14:32:41] [INFO]  [STEP 5 — DEPLOY]   Updating configuration (role, env vars, timeout)...
+[14:32:43] [INFO]  [STEP 5 — DEPLOY]   Waiting for config update to complete...
+[14:32:45] [OK]    [STEP 5 — DEPLOY]   alexa_fulfillment deployed  region=eu-west-1
+[14:32:45] [OK]    [STEP 5 — DEPLOY]   ARN: arn:aws:lambda:eu-west-1:123456789012:function:alexa_fulfillment
+```
+
+**Step 6 — CW Log Retention:**
+```
+[14:32:46] [INFO]  [STEP 6 — LOGS]  Setting log retention: /aws/lambda/alexa_fulfillment → 30 days (eu-west-1)
+[14:32:46] [OK]    [STEP 6 — LOGS]  Retention set
+```
+
+**Step 7 — Post-Deploy Instructions:**
+```
+[14:32:46] [INFO]  [STEP 7 — POST-DEPLOY]  ── Manual steps required ──────────────────────────────
+[14:32:46] [WARN]  [STEP 7 — POST-DEPLOY]  The following CANNOT be automated — complete them manually:
+...exact CLI commands printed...
+```
+
+**Final Summary:**
+```
+[14:32:47] [OK]    [SUMMARY]  deploy_alexa_ireland.py completed  env=honeywell-prod
+[14:32:47] [INFO]  [SUMMARY]  Duration: 47s
+[14:32:47] [INFO]  [SUMMARY]  Lambda ARN: arn:aws:lambda:eu-west-1:123456789012:function:alexa_fulfillment
+[14:32:47] [WARN]  [SUMMARY]  Remember: add Alexa Smart Home trigger + register ARN in Developer Console
+```
+
+**On ERROR:** Full Python exception traceback printed immediately. Deployment stops. Any resources already deployed before the error are left in place (not rolled back).
