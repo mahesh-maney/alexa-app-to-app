@@ -405,8 +405,8 @@ ZIP=$(package_lambda "alexa_complete_app_to_app" "${LAMBDA_DIR}/alexa_complete_a
 deploy_lambda "alexa_complete_app_to_app" "$ZIP" "$ROLE_COMPLETE_ARN" \
   "${ALEXA_COMMON},SESSION_TABLE=alexa_app_linking_sessions,LWA_TOKENS_TABLE=digilux_honeywell_alexa_lwa_tokens,LWA_SECRET_ARN=${LWA_SECRET_ARN},KMS_KEY_ARN=${KMS_KEY_ARN},ALEXA_SKILL_ID=${ALEXA_SKILL_ID:-}" 30
 
-ZIP=$(package_lambda "alexa_callback" "${LAMBDA_DIR}/alexa_callback")
-deploy_lambda "alexa_callback" "$ZIP" "$ROLE_CALLBACK_ARN" \
+ZIP=$(package_lambda "alexa_server_callback" "${LAMBDA_DIR}/alexa_server_callback")
+deploy_lambda "alexa_server_callback" "$ZIP" "$ROLE_CALLBACK_ARN" \
   "${ALEXA_COMMON},APP_DEEP_LINK_SCHEME=digilux,APP_DEEP_LINK_HOST=alexa" 10
 
 ZIP=$(package_lambda "alexa_unlink" "${LAMBDA_DIR}/alexa_unlink")
@@ -432,7 +432,7 @@ wire_method GET    "$STATUS_ID"     "alexa_link_status"      "COGNITO_USER_POOLS
 wire_method POST   "$START_ID"      "alexa_start_app_to_app"  "COGNITO_USER_POOLS"
 wire_method POST   "$COMPLETE_ID"   "alexa_complete_app_to_app" "COGNITO_USER_POOLS"
 wire_method DELETE "$UNLINK_ID"     "alexa_unlink"           "COGNITO_USER_POOLS"
-wire_method GET    "$CALLBACK_ID"   "alexa_callback"         "NONE"
+wire_method GET    "$CALLBACK_ID"   "alexa_server_callback"         "NONE"
 wire_method POST   "$SKILL_EVENT_ID" "alexa_skill_events"    "NONE"
 
 _pass "Alexa API Gateway routes wired"

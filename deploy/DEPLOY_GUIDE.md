@@ -293,7 +293,7 @@ deploy/
 lambdas/
   alexa_start_app_to_app/
   alexa_complete_app_to_app/
-  alexa_callback/
+  alexa_server_callback/
   alexa_unlink/
   alexa_link_status/
   google_home_start/
