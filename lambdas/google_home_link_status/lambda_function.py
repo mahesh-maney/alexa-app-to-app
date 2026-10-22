@@ -1,5 +1,5 @@
 """
-google_home_status — GET /api/v1/voice/google-home/account-linking
+google_home_link_status — GET /api/v1/voice/google-home/account-linking
 
 Returns the current Google Home account linking status for the authenticated user.
 
@@ -39,13 +39,13 @@ _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
 # ── Startup diagnostics ────────────────────────────────────────────────────────
 if _missing_vars:
     logger.error(
-        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_status "
+        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_link_status "
         "— all invocations will return HTTP 500",
         _missing_vars,
     )
 else:
     logger.info(
-        "CONFIG_OK function=google_home_status region=%s tokens_table=%s agent_id=%s",
+        "CONFIG_OK function=google_home_link_status region=%s tokens_table=%s agent_id=%s",
         _REGION, _TOKENS_TABLE, _AGENT_ID,
     )
 
@@ -98,7 +98,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     query      = event.get("queryStringParameters") or {}
 
     logger.info(
-        "REQUEST_START function=google_home_status method=%s path=%s "
+        "REQUEST_START function=google_home_link_status method=%s path=%s "
         "query=%s source_ip=%s request_id=%s",
         method, path, list(query.keys()), source_ip, request_id,
     )
@@ -118,7 +118,7 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     if not auth:
         logger.warning(
-            "AUTH_MISSING function=google_home_status source_ip=%s request_id=%s",
+            "AUTH_MISSING function=google_home_link_status source_ip=%s request_id=%s",
             source_ip, request_id,
         )
         _audit("GH_STATUS_AUTH_MISSING", source_ip=source_ip, request_id=request_id)
@@ -134,7 +134,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     try:
         user_id = _decode_jwt_sub(token)
         logger.info(
-            "AUTH_OK function=google_home_status userId=%s request_id=%s",
+            "AUTH_OK function=google_home_link_status userId=%s request_id=%s",
             user_id, request_id,
         )
         _audit("GH_STATUS_AUTH_OK", userId=user_id, request_id=request_id)
@@ -209,7 +209,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         response["linkedAt"] = linked_at
 
     logger.info(
-        "REQUEST_OK function=google_home_status userId=%s linked=%s request_id=%s",
+        "REQUEST_OK function=google_home_link_status userId=%s linked=%s request_id=%s",
         user_id, linked, request_id,
     )
     return _resp(200, response)

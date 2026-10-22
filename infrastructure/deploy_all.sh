@@ -397,8 +397,8 @@ ALLOWED_REDIRECT_HOSTS="iot.digilux.co.in"
 
 ALEXA_COMMON="DATA_REGION=${REGION},LOG_LEVEL=${LOG_LEVEL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_REGION=${COGNITO_REGION},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}"
 
-ZIP=$(package_lambda "alexa_start_app_to_app" "${LAMBDA_DIR}/alexa_start_app_to_app")
-deploy_lambda "alexa_start_app_to_app" "$ZIP" "$ROLE_START_ARN" \
+ZIP=$(package_lambda "alexa_app_to_app_link" "${LAMBDA_DIR}/alexa_app_to_app_link")
+deploy_lambda "alexa_app_to_app_link" "$ZIP" "$ROLE_START_ARN" \
   "${ALEXA_COMMON},SESSION_TABLE=alexa_app_linking_sessions,REDIRECT_URI=${REDIRECT_URI},ALLOWED_REDIRECT_HOSTS=${ALLOWED_REDIRECT_HOSTS},KMS_KEY_ARN=${KMS_KEY_ARN}" 15
 
 ZIP=$(package_lambda "alexa_complete_app_to_app" "${LAMBDA_DIR}/alexa_complete_app_to_app")
@@ -409,8 +409,8 @@ ZIP=$(package_lambda "alexa_server_callback" "${LAMBDA_DIR}/alexa_server_callbac
 deploy_lambda "alexa_server_callback" "$ZIP" "$ROLE_CALLBACK_ARN" \
   "${ALEXA_COMMON},APP_DEEP_LINK_SCHEME=digilux,APP_DEEP_LINK_HOST=alexa" 10
 
-ZIP=$(package_lambda "alexa_unlink" "${LAMBDA_DIR}/alexa_unlink")
-deploy_lambda "alexa_unlink" "$ZIP" "$ROLE_UNLINK_ARN" \
+ZIP=$(package_lambda "alexa_app_to_app_unlink" "${LAMBDA_DIR}/alexa_app_to_app_unlink")
+deploy_lambda "alexa_app_to_app_unlink" "$ZIP" "$ROLE_UNLINK_ARN" \
   "${ALEXA_COMMON},LWA_TOKENS_TABLE=digilux_honeywell_alexa_lwa_tokens,USER_DEVICE_MAPPING_TABLE=digilux_honeywell_user_device_mapping,LWA_SECRET_ARN=${LWA_SECRET_ARN},KMS_KEY_ARN=${KMS_KEY_ARN},ALEXA_SKILL_ID=${ALEXA_SKILL_ID:-}" 15
 
 ZIP=$(package_lambda "alexa_link_status" "${LAMBDA_DIR}/alexa_link_status")
@@ -429,11 +429,11 @@ CALLBACK_ID=$(get_or_create_resource "$ROOT_ALEXA_ID" "callback")
 SKILL_EVENT_ID=$(get_or_create_resource "$ROOT_ALEXA_ID" "skill-event")
 
 wire_method GET    "$STATUS_ID"     "alexa_link_status"      "COGNITO_USER_POOLS"
-wire_method POST   "$START_ID"      "alexa_start_app_to_app"  "COGNITO_USER_POOLS"
+wire_method POST   "$START_ID"      "alexa_app_to_app_link"  "COGNITO_USER_POOLS"
 wire_method POST   "$COMPLETE_ID"   "alexa_complete_app_to_app" "COGNITO_USER_POOLS"
-wire_method DELETE "$UNLINK_ID"     "alexa_unlink"           "COGNITO_USER_POOLS"
+wire_method DELETE "$UNLINK_ID"     "alexa_app_to_app_unlink"           "COGNITO_USER_POOLS"
 wire_method GET    "$CALLBACK_ID"   "alexa_server_callback"         "NONE"
-wire_method POST   "$SKILL_EVENT_ID" "alexa_skill_events"    "NONE"
+wire_method POST   "$SKILL_EVENT_ID" "alexa_skill_server_events"    "NONE"
 
 _pass "Alexa API Gateway routes wired"
 
@@ -559,20 +559,20 @@ GH_COMMON="DATA_REGION=${REGION},LOG_LEVEL=${LOG_LEVEL}"
 GH_TABLES="GH_SESSIONS_TABLE=google_home_link_sessions,GH_AUTH_CODES_TABLE=google_home_auth_codes,GH_TOKENS_TABLE=google_home_tokens"
 ALLOWED_REDIRECT_URIS="https://oauth-redirect.googleusercontent.com/r/${GOOGLE_AGENT_ID},https://oauth-redirect-sandbox.googleusercontent.com/r/${GOOGLE_AGENT_ID}"
 
-ZIP=$(package_lambda "google_home_start" "${LAMBDA_DIR}/google_home_start")
-deploy_lambda "google_home_start" "$ZIP" "$ROLE_GH_START_ARN" \
+ZIP=$(package_lambda "google_home_start_link" "${LAMBDA_DIR}/google_home_start_link")
+deploy_lambda "google_home_start_link" "$ZIP" "$ROLE_GH_START_ARN" \
   "${GH_COMMON},GH_SESSIONS_TABLE=google_home_link_sessions,GOOGLE_AGENT_ID=${GOOGLE_AGENT_ID},OAUTH_BASE_URL=${OAUTH_BASE_URL},GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}" 15
 
-ZIP=$(package_lambda "google_home_complete" "${LAMBDA_DIR}/google_home_complete")
-deploy_lambda "google_home_complete" "$ZIP" "$ROLE_GH_COMPLETE_ARN" \
+ZIP=$(package_lambda "google_home_app_link_complete" "${LAMBDA_DIR}/google_home_app_link_complete")
+deploy_lambda "google_home_app_link_complete" "$ZIP" "$ROLE_GH_COMPLETE_ARN" \
   "${GH_COMMON},GH_SESSIONS_TABLE=google_home_link_sessions,GH_TOKENS_TABLE=google_home_tokens" 15
 
-ZIP=$(package_lambda "google_home_status" "${LAMBDA_DIR}/google_home_status")
-deploy_lambda "google_home_status" "$ZIP" "$ROLE_GH_STATUS_ARN" \
+ZIP=$(package_lambda "google_home_link_status" "${LAMBDA_DIR}/google_home_link_status")
+deploy_lambda "google_home_link_status" "$ZIP" "$ROLE_GH_STATUS_ARN" \
   "${GH_COMMON},GH_TOKENS_TABLE=google_home_tokens,GOOGLE_AGENT_ID=${GOOGLE_AGENT_ID}" 15
 
-ZIP=$(package_lambda "google_home_unlink" "${LAMBDA_DIR}/google_home_unlink")
-deploy_lambda "google_home_unlink" "$ZIP" "$ROLE_GH_UNLINK_ARN" \
+ZIP=$(package_lambda "google_home_app_unlink" "${LAMBDA_DIR}/google_home_app_unlink")
+deploy_lambda "google_home_app_unlink" "$ZIP" "$ROLE_GH_UNLINK_ARN" \
   "${GH_COMMON},GH_TOKENS_TABLE=google_home_tokens,GOOGLE_CLIENT_SECRET_ARN=${GOOGLE_SECRET_ARN}" 15
 
 ZIP=$(package_lambda "google_home_oauth_authorize" "${LAMBDA_DIR}/google_home_oauth_authorize")
@@ -596,10 +596,10 @@ DEEP_LINK_ID=$(get_or_create_resource "$LINKING_ID" "deep-link")
 GH_START_ID=$(get_or_create_resource "$DEEP_LINK_ID" "start")
 GH_COMPLETE_ID=$(get_or_create_resource "$DEEP_LINK_ID" "complete")
 
-wire_method POST   "$GH_START_ID"    "google_home_start"    "COGNITO_USER_POOLS"
-wire_method POST   "$GH_COMPLETE_ID" "google_home_complete"  "COGNITO_USER_POOLS"
-wire_method GET    "$LINKING_ID"     "google_home_status"    "COGNITO_USER_POOLS"
-wire_method DELETE "$LINKING_ID"     "google_home_unlink"    "COGNITO_USER_POOLS"
+wire_method POST   "$GH_START_ID"    "google_home_start_link"    "COGNITO_USER_POOLS"
+wire_method POST   "$GH_COMPLETE_ID" "google_home_app_link_complete"  "COGNITO_USER_POOLS"
+wire_method GET    "$LINKING_ID"     "google_home_link_status"    "COGNITO_USER_POOLS"
+wire_method DELETE "$LINKING_ID"     "google_home_app_unlink"    "COGNITO_USER_POOLS"
 
 # OAuth + fulfillment routes (called by Google — no Cognito auth)
 ROOT_GH_ID=$(get_or_create_resource "$ROOT_ID" "google-home")

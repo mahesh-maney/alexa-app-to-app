@@ -277,7 +277,7 @@ def _exchange_code(code: str, code_verifier: str) -> dict:
 def _get_amazon_user_id(access_token: str) -> str | None:
     """
     Call the Amazon LWA Profile API to get the stable Amazon user ID.
-    This ID is stored in DynamoDB so that the alexa_skill_events Lambda
+    This ID is stored in DynamoDB so that the alexa_skill_server_events Lambda
     can look up the Cognito userId when Alexa sends a SkillDisabled event.
     Returns None on failure — best-effort, does not block linking.
     """

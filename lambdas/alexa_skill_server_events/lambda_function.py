@@ -1,5 +1,5 @@
 """
-alexa_skill_events — POST /alexa/skill-event
+alexa_skill_server_events — POST /alexa/skill-event
 
 Handles Alexa skill lifecycle events sent by Amazon.
 

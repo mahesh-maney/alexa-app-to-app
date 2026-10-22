@@ -1,5 +1,5 @@
 """
-google_home_start — POST /api/v1/voice/google-home/account-linking/deep-link/start
+google_home_start_link — POST /api/v1/voice/google-home/account-linking/deep-link/start
 
 Initiates a Google Home deep-link account linking session.
 
@@ -65,13 +65,13 @@ _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
 # ── Startup diagnostics ────────────────────────────────────────────────────────
 if _missing_vars:
     logger.error(
-        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_start "
+        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_start_link "
         "— all invocations will return HTTP 500 until these are set",
         _missing_vars,
     )
 else:
     logger.info(
-        "CONFIG_OK function=google_home_start region=%s sessions_table=%s "
+        "CONFIG_OK function=google_home_start_link region=%s sessions_table=%s "
         "agent_id=%s ttl_seconds=%d oauth_base_url=%s "
         "deep_link_base=%s deep_link_path=%s web_fallback_configured=%s",
         _REGION, _SESSIONS_TABLE, _AGENT_ID, _SESSION_TTL_S, _OAUTH_BASE_URL,
@@ -176,7 +176,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     source_ip = (event.get("requestContext") or {}).get("identity", {}).get("sourceIp", "")
 
     logger.info(
-        "REQUEST_START function=google_home_start method=%s path=%s "
+        "REQUEST_START function=google_home_start_link method=%s path=%s "
         "source_ip=%s request_id=%s",
         method, path, source_ip, request_id,
     )
@@ -184,7 +184,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     # ── 0. Config guard ────────────────────────────────────────────────────────
     if _missing_vars:
         logger.error(
-            "CONFIG_ERROR missing=%s function=google_home_start request_id=%s "
+            "CONFIG_ERROR missing=%s function=google_home_start_link request_id=%s "
             "— cannot process request",
             _missing_vars, request_id,
         )
@@ -205,7 +205,7 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     if not auth:
         logger.warning(
-            "AUTH_MISSING no Authorization header function=google_home_start "
+            "AUTH_MISSING no Authorization header function=google_home_start_link "
             "source_ip=%s request_id=%s",
             source_ip, request_id,
         )
@@ -222,7 +222,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     try:
         user_id = _decode_jwt_sub(token)
         logger.info(
-            "AUTH_OK function=google_home_start userId=%s request_id=%s",
+            "AUTH_OK function=google_home_start_link userId=%s request_id=%s",
             user_id, request_id,
         )
         _audit("GH_START_AUTH_OK", userId=user_id, request_id=request_id)
@@ -309,7 +309,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         body["webFallbackUrl"] = web_fallback_url
 
     logger.info(
-        "REQUEST_OK function=google_home_start userId=%s state=%s "
+        "REQUEST_OK function=google_home_start_link userId=%s state=%s "
         "home_app_deep_link_present=true web_fallback_present=%s request_id=%s",
         user_id, state, bool(web_fallback_url), request_id,
     )

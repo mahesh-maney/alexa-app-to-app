@@ -1,5 +1,5 @@
 """
-google_home_unlink — DELETE /api/v1/voice/google-home/account-linking
+google_home_app_unlink — DELETE /api/v1/voice/google-home/account-linking
 
 Unlinks the Google Home account for the authenticated user:
   1. Authenticates the caller via Cognito JWT
@@ -53,12 +53,12 @@ _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
 # ── Startup diagnostics ────────────────────────────────────────────────────────
 if _missing_vars:
     logger.error(
-        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_unlink",
+        "CONFIG_STARTUP_ERROR missing_required_env=%s function=google_home_app_unlink",
         _missing_vars,
     )
 else:
     logger.info(
-        "CONFIG_OK function=google_home_unlink region=%s tokens_table=%s "
+        "CONFIG_OK function=google_home_app_unlink region=%s tokens_table=%s "
         "home_graph_unlink_configured=%s http_timeout=%d",
         _REGION, _TOKENS_TABLE, bool(_GH_SA_KEY_SECRET_ARN), _HTTP_TIMEOUT,
     )
@@ -318,7 +318,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     source_ip  = (event.get("requestContext") or {}).get("identity", {}).get("sourceIp", "")
 
     logger.info(
-        "REQUEST_START function=google_home_unlink method=%s path=%s "
+        "REQUEST_START function=google_home_app_unlink method=%s path=%s "
         "source_ip=%s request_id=%s",
         method, path, source_ip, request_id,
     )
@@ -336,7 +336,7 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     if not auth:
         logger.warning(
-            "AUTH_MISSING function=google_home_unlink source_ip=%s request_id=%s",
+            "AUTH_MISSING function=google_home_app_unlink source_ip=%s request_id=%s",
             source_ip, request_id,
         )
         _audit("GH_UNLINK_AUTH_MISSING", source_ip=source_ip, request_id=request_id)
@@ -352,7 +352,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     try:
         user_id = _decode_jwt_sub(token)
         logger.info(
-            "AUTH_OK function=google_home_unlink userId=%s request_id=%s",
+            "AUTH_OK function=google_home_app_unlink userId=%s request_id=%s",
             user_id, request_id,
         )
         _audit("GH_UNLINK_AUTH_OK", userId=user_id, request_id=request_id)
@@ -460,7 +460,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         return _resp(500, {"error": "Failed to unlink account"})
 
     logger.info(
-        "REQUEST_OK function=google_home_unlink userId=%s request_id=%s",
+        "REQUEST_OK function=google_home_app_unlink userId=%s request_id=%s",
         user_id, request_id,
     )
     return _resp(200, {"linked": False})

@@ -1,5 +1,5 @@
 """
-alexa_start_app_to_app — POST /api/v1/alexa/startAppToApp
+alexa_app_to_app_link — POST /api/v1/alexa/startAppToApp
 
 Initiates an Alexa App-to-App account linking session.
 

@@ -291,15 +291,15 @@ deploy/
   DEPLOY_GUIDE.md            # This file
 
 lambdas/
-  alexa_start_app_to_app/
+  alexa_app_to_app_link/
   alexa_complete_app_to_app/
   alexa_server_callback/
-  alexa_unlink/
+  alexa_app_to_app_unlink/
   alexa_link_status/
-  google_home_start/
-  google_home_complete/
-  google_home_status/
-  google_home_unlink/
+  google_home_start_link/
+  google_home_app_link_complete/
+  google_home_link_status/
+  google_home_app_unlink/
   google_home_oauth_authorize/
   google_home_oauth_token/
   google_home_fulfillment/

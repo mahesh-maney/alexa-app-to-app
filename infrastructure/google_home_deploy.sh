@@ -58,10 +58,10 @@ GH_AUTH_CODES_TABLE="google_home_auth_codes"
 GH_TOKENS_TABLE="google_home_tokens"
 USER_DEVICE_MAPPING_TABLE="digilux_honeywell_user_device_mapping"
 
-LAMBDA_START="google_home_start"
-LAMBDA_COMPLETE="google_home_complete"
-LAMBDA_STATUS="google_home_status"
-LAMBDA_UNLINK="google_home_unlink"
+LAMBDA_START="google_home_start_link"
+LAMBDA_COMPLETE="google_home_app_link_complete"
+LAMBDA_STATUS="google_home_link_status"
+LAMBDA_UNLINK="google_home_app_unlink"
 LAMBDA_AUTHORIZE="google_home_oauth_authorize"
 LAMBDA_TOKEN="google_home_oauth_token"
 LAMBDA_FULFILLMENT="google_home_fulfillment"
@@ -499,10 +499,10 @@ FULFILLMENT_ENV="{
   LOG_LEVEL=INFO
 }"
 
-deploy_lambda "$LAMBDA_START"       "${LAMBDA_DIR}/google_home_start"           "$ROLE_START_ARN"       "$START_ENV"       15
-deploy_lambda "$LAMBDA_COMPLETE"    "${LAMBDA_DIR}/google_home_complete"        "$ROLE_COMPLETE_ARN"    "$COMPLETE_ENV"    15
-deploy_lambda "$LAMBDA_STATUS"      "${LAMBDA_DIR}/google_home_status"          "$ROLE_STATUS_ARN"      "$STATUS_ENV"      10
-deploy_lambda "$LAMBDA_UNLINK"      "${LAMBDA_DIR}/google_home_unlink"          "$ROLE_UNLINK_ARN"      "$UNLINK_ENV"      15
+deploy_lambda "$LAMBDA_START"       "${LAMBDA_DIR}/google_home_start_link"           "$ROLE_START_ARN"       "$START_ENV"       15
+deploy_lambda "$LAMBDA_COMPLETE"    "${LAMBDA_DIR}/google_home_app_link_complete"        "$ROLE_COMPLETE_ARN"    "$COMPLETE_ENV"    15
+deploy_lambda "$LAMBDA_STATUS"      "${LAMBDA_DIR}/google_home_link_status"          "$ROLE_STATUS_ARN"      "$STATUS_ENV"      10
+deploy_lambda "$LAMBDA_UNLINK"      "${LAMBDA_DIR}/google_home_app_unlink"          "$ROLE_UNLINK_ARN"      "$UNLINK_ENV"      15
 deploy_lambda "$LAMBDA_AUTHORIZE"   "${LAMBDA_DIR}/google_home_oauth_authorize" "$ROLE_AUTHORIZE_ARN"   "$AUTHORIZE_ENV"   15
 deploy_lambda "$LAMBDA_TOKEN"       "${LAMBDA_DIR}/google_home_oauth_token"     "$ROLE_TOKEN_ARN"       "$TOKEN_ENV"       15
 deploy_lambda "$LAMBDA_FULFILLMENT" "${LAMBDA_DIR}/google_home_fulfillment"     "$ROLE_FULFILLMENT_ARN" "$FULFILLMENT_ENV" 30

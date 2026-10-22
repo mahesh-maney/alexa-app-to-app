@@ -33,10 +33,10 @@ ALLOWED_REDIRECT_HOSTS="iot.digilux.co.in"
 SESSION_TABLE="alexa_app_linking_sessions"
 LWA_TOKENS_TABLE="digilux_honeywell_alexa_lwa_tokens"
 USER_DEVICE_MAPPING_TABLE="digilux_honeywell_user_device_mapping"
-LAMBDA_START="alexa_start_app_to_app"
+LAMBDA_START="alexa_app_to_app_link"
 LAMBDA_COMPLETE="alexa_complete_app_to_app"
 LAMBDA_CALLBACK="alexa_server_callback"
-LAMBDA_UNLINK="alexa_unlink"
+LAMBDA_UNLINK="alexa_app_to_app_unlink"
 LAMBDA_STATUS="alexa_link_status"
 
 # IAM role names (one per Lambda for least privilege)
@@ -441,10 +441,10 @@ STATUS_ENV="{
   LOG_LEVEL=INFO
 }"
 
-deploy_lambda "$LAMBDA_START"    "${LAMBDA_DIR}/alexa_start_app_to_app"    "$ROLE_START_ARN"    "$START_ENV"    15
+deploy_lambda "$LAMBDA_START"    "${LAMBDA_DIR}/alexa_app_to_app_link"    "$ROLE_START_ARN"    "$START_ENV"    15
 deploy_lambda "$LAMBDA_COMPLETE" "${LAMBDA_DIR}/alexa_complete_app_to_app" "$ROLE_COMPLETE_ARN" "$COMPLETE_ENV" 30
 deploy_lambda "$LAMBDA_CALLBACK" "${LAMBDA_DIR}/alexa_server_callback"            "$ROLE_CALLBACK_ARN" "$CALLBACK_ENV" 10
-deploy_lambda "$LAMBDA_UNLINK"   "${LAMBDA_DIR}/alexa_unlink"              "$ROLE_UNLINK_ARN"   "$UNLINK_ENV"   15
+deploy_lambda "$LAMBDA_UNLINK"   "${LAMBDA_DIR}/alexa_app_to_app_unlink"              "$ROLE_UNLINK_ARN"   "$UNLINK_ENV"   15
 deploy_lambda "$LAMBDA_STATUS"   "${LAMBDA_DIR}/alexa_link_status"         "$ROLE_STATUS_ARN"   "$STATUS_ENV"   15
 
 # ── 4. AWS WAF WebACL ─────────────────────────────────────────────────────────

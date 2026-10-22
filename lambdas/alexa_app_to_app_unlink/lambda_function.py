@@ -1,5 +1,5 @@
 """
-alexa_unlink — DELETE /api/v1/alexa/unlink
+alexa_app_to_app_unlink — DELETE /api/v1/alexa/unlink
 
 Unlinks a user's Alexa account from Digilux.
 
