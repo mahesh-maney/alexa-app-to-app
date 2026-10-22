@@ -146,6 +146,14 @@ ENDPOINT_KEY_SECRET_ARN=$(cfg ENDPOINT_KEY_SECRET_ARN)
 ENDPOINT_KEY_REGION=$(cfg ENDPOINT_KEY_REGION)
 DEVICE_MODEL=$(cfg DEVICE_MODEL)
 
+COGNITO_HOSTED_UI_DOMAIN=$(cfg COGNITO_HOSTED_UI_DOMAIN)
+GH_OAUTH_TRANSACTIONS_TABLE=$(cfg GH_OAUTH_TRANSACTIONS_TABLE)
+TRANSACTION_TTL_SECONDS=$(cfg TRANSACTION_TTL_SECONDS)
+BRAND_TITLE=$(cfg BRAND_TITLE)
+BRAND_SUBTITLE=$(cfg BRAND_SUBTITLE)
+TERMS_URL=$(cfg TERMS_URL)
+PRIVACY_POLICY_URL=$(cfg PRIVACY_POLICY_URL)
+
 DEPLOY_ALEXA=0; DEPLOY_GOOGLE=0
 case "$DEPLOY_TARGET" in
   alexa)  DEPLOY_ALEXA=1 ;;
@@ -220,10 +228,12 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
   validate_required "GH_SESSIONS_TABLE"    "$GH_SESSIONS_TABLE"
   validate_required "GH_AUTH_CODES_TABLE"  "$GH_AUTH_CODES_TABLE"
   validate_required "GH_TOKENS_TABLE"      "$GH_TOKENS_TABLE"
-  validate_required "USER_DEVICE_MAPPING_TABLE" "$USER_DEVICE_MAPPING_TABLE"
-  validate_required "USER_DEVICE_DETAILS_TABLE" "$USER_DEVICE_DETAILS_TABLE"
-  validate_required "METADATA_BUCKET"           "$METADATA_BUCKET"
-  validate_required "ENDPOINT_KEY_SECRET_ARN"   "$ENDPOINT_KEY_SECRET_ARN"
+  validate_required "USER_DEVICE_MAPPING_TABLE"    "$USER_DEVICE_MAPPING_TABLE"
+  validate_required "USER_DEVICE_DETAILS_TABLE"    "$USER_DEVICE_DETAILS_TABLE"
+  validate_required "METADATA_BUCKET"              "$METADATA_BUCKET"
+  validate_required "ENDPOINT_KEY_SECRET_ARN"      "$ENDPOINT_KEY_SECRET_ARN"
+  validate_required "COGNITO_HOSTED_UI_DOMAIN"     "$COGNITO_HOSTED_UI_DOMAIN"
+  validate_required "GH_OAUTH_TRANSACTIONS_TABLE"  "$GH_OAUTH_TRANSACTIONS_TABLE"
   validate_required "APP_NAME"             "$APP_NAME"
   validate_required "DEVICE_MANUFACTURER"  "$DEVICE_MANUFACTURER"
 fi
@@ -305,7 +315,8 @@ package_lambda() {
 deploy_lambda() {
   # 6th arg REGION overrides AWS_REGION — use for cross-region Lambdas
   # (e.g. Alexa fulfillment in eu-west-1 while main region is us-east-1)
-  local NAME="$1" ZIP="$2" ROLE_ARN="$3" ENV_JSON="$4" TIMEOUT="${5:-15}" REGION="${6:-$AWS_REGION}"
+  # 7th arg MEMORY_MB overrides default 256 MB
+  local NAME="$1" ZIP="$2" ROLE_ARN="$3" ENV_JSON="$4" TIMEOUT="${5:-15}" REGION="${6:-$AWS_REGION}" MEMORY="${7:-256}"
   if aws lambda get-function --function-name "$NAME" --region "$REGION" &>/dev/null; then
     aws lambda update-function-code \
       --function-name "$NAME" --zip-file "fileb://${ZIP}" \
@@ -315,7 +326,7 @@ deploy_lambda() {
       --function-name "$NAME" \
       --role "$ROLE_ARN" \
       --timeout "$TIMEOUT" \
-      --memory-size 256 \
+      --memory-size "$MEMORY" \
       --environment "$ENV_JSON" \
       --tracing-config Mode=Active \
       --region "$REGION" --output text --query 'FunctionName' > /dev/null
@@ -329,7 +340,7 @@ deploy_lambda() {
       --handler lambda_function.lambda_handler \
       --zip-file "fileb://${ZIP}" \
       --timeout "$TIMEOUT" \
-      --memory-size 256 \
+      --memory-size "$MEMORY" \
       --environment "$ENV_JSON" \
       --tracing-config Mode=Active \
       --region "$REGION" --output text --query 'FunctionName' > /dev/null
@@ -731,7 +742,7 @@ deploy_lambda "alexa_skill_server_events" "$ZIP" "$ROLE_SKILL_EVT_ARN" \
   "$(env_json "${ALEXA_COMMON[@]}" \
     "LWA_TOKENS_TABLE=${ALEXA_TOKENS_TABLE}" \
     "USER_DEVICE_MAPPING_TABLE=${USER_DEVICE_MAPPING_TABLE}" \
-    "ALEXA_SKILL_ID=${ALEXA_SKILL_ID}")" 15
+    "ALEXA_SKILL_ID=${ALEXA_SKILL_ID}")" 15 "$AWS_REGION" 128
 
 # ── Step 8a: API Gateway Routes ───────────────────────────────────────────────
 _section "STEP 8a — ALEXA API GATEWAY ROUTES"
@@ -848,9 +859,10 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
 # ── Step 4b: DynamoDB ─────────────────────────────────────────────────────────
 _section "STEP 4b — GOOGLE HOME DynamoDB TABLES"
 
-ensure_ddb_table "$GH_SESSIONS_TABLE"   "state"
-ensure_ddb_table "$GH_AUTH_CODES_TABLE" "code"
-ensure_ddb_table "$GH_TOKENS_TABLE"     "userId"
+ensure_ddb_table "$GH_SESSIONS_TABLE"          "state"
+ensure_ddb_table "$GH_AUTH_CODES_TABLE"        "code"
+ensure_ddb_table "$GH_TOKENS_TABLE"            "userId"
+ensure_ddb_table "$GH_OAUTH_TRANSACTIONS_TABLE" "state"
 
 ensure_ddb_gsi "$GH_TOKENS_TABLE" "${GH_TOKENS_ACCESS_TOKEN_INDEX}" "accessToken"
 ensure_ddb_gsi "$GH_TOKENS_TABLE" "refreshToken-index"              "refreshToken"
@@ -861,6 +873,7 @@ _section "STEP 5b — GOOGLE HOME IAM ROLES"
 DDB_GH_SESSIONS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_SESSIONS_TABLE}"
 DDB_GH_CODES_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_AUTH_CODES_TABLE}"
 DDB_GH_TOKENS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_TOKENS_TABLE}"
+DDB_GH_TRANSACTIONS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_OAUTH_TRANSACTIONS_TABLE}"
 DDB_USER_DEVICE_DETAILS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${USER_DEVICE_DETAILS_TABLE}"
 DDB_DEVICE_STATE_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${DEVICE_STATE_TABLE}"
 DDB_SCENE_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${SCENE_TABLE}"
@@ -906,9 +919,16 @@ ROLE_GH_UNLINK_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-unlink-role" "{
 
 ROLE_GH_AUTHORIZE_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-authorize-role" "{
   \"Version\":\"2012-10-17\",\"Statement\":[
-    {\"Sid\":\"Sessions\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"${DDB_GH_SESSIONS_ARN}\"},
+    {\"Sid\":\"Transactions\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\"],\"Resource\":\"${DDB_GH_TRANSACTIONS_ARN}\"},
+    {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+  ]
+}")
+
+# Consent screen + Cognito callback Lambda — reads/updates/deletes transactions, writes auth codes
+ROLE_GH_CALLBACK_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-callback-role" "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Sid\":\"Transactions\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"${DDB_GH_TRANSACTIONS_ARN}\"},
     {\"Sid\":\"AuthCodes\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\"],\"Resource\":\"${DDB_GH_CODES_ARN}\"},
-    {\"Sid\":\"Cognito\",\"Effect\":\"Allow\",\"Action\":[\"cognito-idp:GetUser\"],\"Resource\":\"*\"},
     {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
   ]
 }")
@@ -989,18 +1009,35 @@ deploy_lambda "google_home_app_unlink" "$ZIP" "$ROLE_GH_UNLINK_ARN" \
     "GOOGLE_SECRET_REGION=${GOOGLE_SECRET_REGION}" \
     "GOOGLE_SA_KEY_SECRET_ARN=${GOOGLE_SA_KEY_SECRET_ARN}")" 30
 
+COGNITO_CALLBACK_URI="${API_BASE_URL}/google-home/oauth/cognito/callback"
+
 ZIP=$(package_lambda "google_home_oauth_authorize" "${LAMBDA_DIR}/google_home_oauth_authorize")
 deploy_lambda "google_home_oauth_authorize" "$ZIP" "$ROLE_GH_AUTHORIZE_ARN" \
   "$(env_json "${GH_COMMON[@]}" \
-    "GH_SESSIONS_TABLE=${GH_SESSIONS_TABLE}" \
-    "GH_AUTH_CODES_TABLE=${GH_AUTH_CODES_TABLE}" \
     "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}" \
     "ALLOWED_REDIRECT_URIS=${ALLOWED_REDIRECT_URIS}" \
-    "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}" \
     "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" \
-    "COGNITO_REGION=${COGNITO_REGION}" \
-    "AUTH_CODE_TTL_SECONDS=${AUTH_CODE_TTL_SECONDS}" \
+    "COGNITO_HOSTED_UI_DOMAIN=${COGNITO_HOSTED_UI_DOMAIN}" \
+    "COGNITO_CALLBACK_URI=${COGNITO_CALLBACK_URI}" \
+    "GH_OAUTH_TRANSACTIONS_TABLE=${GH_OAUTH_TRANSACTIONS_TABLE}" \
+    "TRANSACTION_TTL_SECONDS=${TRANSACTION_TTL_SECONDS}" \
     "APP_NAME=${APP_NAME}")" 15
+
+# Consent screen: handles GET /cognito/callback (token exchange + Cognito auth) and POST /consent (approve/deny)
+ZIP=$(package_lambda "google_home_oauth_cognito_callback" "${LAMBDA_DIR}/google_home_oauth_consent_screen")
+deploy_lambda "google_home_oauth_cognito_callback" "$ZIP" "$ROLE_GH_CALLBACK_ARN" \
+  "$(env_json "${GH_COMMON[@]}" \
+    "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" \
+    "COGNITO_HOSTED_UI_DOMAIN=${COGNITO_HOSTED_UI_DOMAIN}" \
+    "COGNITO_CALLBACK_URI=${COGNITO_CALLBACK_URI}" \
+    "GH_OAUTH_TRANSACTIONS_TABLE=${GH_OAUTH_TRANSACTIONS_TABLE}" \
+    "GH_AUTH_CODES_TABLE=${GH_AUTH_CODES_TABLE}" \
+    "AUTH_CODE_TTL_SECONDS=${AUTH_CODE_TTL_SECONDS}" \
+    "APP_NAME=${APP_NAME}" \
+    "BRAND_TITLE=${BRAND_TITLE}" \
+    "BRAND_SUBTITLE=${BRAND_SUBTITLE}" \
+    "TERMS_URL=${TERMS_URL}" \
+    "PRIVACY_POLICY_URL=${PRIVACY_POLICY_URL}")" 15
 
 ZIP=$(package_lambda "google_home_oauth_token" "${LAMBDA_DIR}/google_home_oauth_token")
 deploy_lambda "google_home_oauth_token" "$ZIP" "$ROLE_GH_TOKEN_ARN" \
@@ -1037,7 +1074,7 @@ deploy_lambda "google_home_proactive" "$ZIP" "$ROLE_GH_PROACTIVE_ARN" \
     "ENDPOINT_KEY_SECRET_ARN=${ENDPOINT_KEY_SECRET_ARN}" \
     "ENDPOINT_KEY_REGION=${ENDPOINT_KEY_REGION}" \
     "GH_SA_SECRET_ARN=${GH_SA_SECRET_ARN}" \
-    "GH_SA_SECRET_REGION=${GH_SA_SECRET_REGION}")" 30
+    "GH_SA_SECRET_REGION=${GH_SA_SECRET_REGION}")" 60
 
 # ── Step 7b: API Gateway Routes ───────────────────────────────────────────────
 _section "STEP 7b — GOOGLE HOME API GATEWAY ROUTES"
@@ -1059,12 +1096,17 @@ ROOT_GH_ID=$(get_or_create_resource "$ROOT_ID"      "google-home")
 OAUTH_ID=$(get_or_create_resource   "$ROOT_GH_ID"   "oauth")
 AUTHORIZE_ID=$(get_or_create_resource "$OAUTH_ID"   "authorize")
 TOKEN_ID=$(get_or_create_resource     "$OAUTH_ID"   "token")
+COGNITO_PARENT_ID=$(get_or_create_resource "$OAUTH_ID" "cognito")
+COGNITO_CALLBACK_RES_ID=$(get_or_create_resource "$COGNITO_PARENT_ID" "callback")
+CONSENT_ID=$(get_or_create_resource   "$OAUTH_ID"   "consent")
 FULFILLMENT_ID=$(get_or_create_resource "$ROOT_GH_ID" "fulfillment")
 
-wire_method GET  "$AUTHORIZE_ID"   "google_home_oauth_authorize" "NONE"
-wire_method POST "$AUTHORIZE_ID"   "google_home_oauth_authorize" "NONE"
-wire_method POST "$TOKEN_ID"       "google_home_oauth_token"     "NONE"
-wire_method POST "$FULFILLMENT_ID" "google_home_fulfillment"     "NONE"
+wire_method GET  "$AUTHORIZE_ID"           "google_home_oauth_authorize"        "NONE"
+wire_method POST "$AUTHORIZE_ID"           "google_home_oauth_authorize"        "NONE"
+wire_method GET  "$COGNITO_CALLBACK_RES_ID" "google_home_oauth_cognito_callback" "NONE"
+wire_method POST "$CONSENT_ID"             "google_home_oauth_cognito_callback" "NONE"
+wire_method POST "$TOKEN_ID"               "google_home_oauth_token"            "NONE"
+wire_method POST "$FULFILLMENT_ID"         "google_home_fulfillment"            "NONE"
 
 _pass "Google Home API Gateway routes wired"
 
@@ -1100,8 +1142,9 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
   smoke "GH complete — no auth → 401"     POST   "${BASE}/api/v1/voice/google-home/account-linking/deep-link/complete" "401"
   smoke "GH status — no auth → 401"       GET    "${BASE}/api/v1/voice/google-home/account-linking"                    "401"
   smoke "GH unlink — no auth → 401"       DELETE "${BASE}/api/v1/voice/google-home/account-linking"                    "401"
-  smoke "GH authorize — reachable → !5xx" GET    "${BASE}/google-home/oauth/authorize"                                  "400"
-  smoke "GH token — reachable → !5xx"     POST   "${BASE}/google-home/oauth/token"                                      "400"
+  smoke "GH authorize — reachable → !5xx"        GET  "${BASE}/google-home/oauth/authorize"                  "400"
+  smoke "GH cognito callback — reachable → !5xx" GET  "${BASE}/google-home/oauth/cognito/callback"         "400"
+  smoke "GH token — reachable → !5xx"            POST "${BASE}/google-home/oauth/token"                    "400"
 fi
 
 # ── Step 11: Google Console Checklist ─────────────────────────────────────────
@@ -1146,7 +1189,14 @@ cat <<CHECKLIST
         ${BASE}/google-home/oauth/token
 
   ─────────────────────────────────────────────────────────
-  4. APP FLIP (Android — bypasses browser login)
+  4. COGNITO HOSTED UI — ALLOWED CALLBACK URL
+  ─────────────────────────────────────────────────────────
+  Add this URL to Cognito app client allowed callback URLs:
+        ${COGNITO_CALLBACK_URI}
+  (Cognito User Pool: ${COGNITO_USER_POOL_ID})
+
+  ─────────────────────────────────────────────────────────
+  5. APP FLIP (Android — bypasses browser login)
   ─────────────────────────────────────────────────────────
   [ ] App package name:   <Android app package name>
   [ ] SHA-256 fingerprint of release signing cert:
@@ -1210,8 +1260,53 @@ EOF
     DELETE ${BASE}/api/v1/voice/google-home/account-linking
     GET    ${BASE}/google-home/oauth/authorize
     POST   ${BASE}/google-home/oauth/authorize
+    GET    ${BASE}/google-home/oauth/cognito/callback
+    POST   ${BASE}/google-home/oauth/consent
     POST   ${BASE}/google-home/oauth/token
     POST   ${BASE}/google-home/fulfillment
 EOF
+
+# ── Manual post-deploy steps (cannot be automated) ────────────────────────────
+echo ""
+echo -e "${YELLOW}━━━ MANUAL POST-DEPLOY STEPS (required for full functionality) ━━━${NC}"
+echo ""
+echo -e "  ${YELLOW}!${NC} The following steps CANNOT be automated by this script."
+echo -e "    Complete them once per new AWS account (Honeywell QA)."
+echo ""
+
+if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
+  echo -e "  ${BOLD}Google Home — DynamoDB Stream Triggers${NC}"
+  echo "    google_home_proactive needs stream triggers from:"
+  echo "      - Table: ${USER_DEVICE_DETAILS_TABLE}  (stream: NEW_AND_OLD_IMAGES, batch 10)"
+  echo "      - Table: ${DEVICE_STATE_TABLE}          (stream: NEW_AND_OLD_IMAGES, batch 10)"
+  echo "    AWS CLI example:"
+  echo "      aws dynamodb update-table --table-name ${USER_DEVICE_DETAILS_TABLE} \\"
+  echo "        --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \\"
+  echo "        --region ${AWS_REGION}"
+  echo "      STREAM_ARN=\$(aws dynamodb describe-table --table-name ${USER_DEVICE_DETAILS_TABLE} \\"
+  echo "        --region ${AWS_REGION} --query 'Table.LatestStreamArn' --output text)"
+  echo "      aws lambda create-event-source-mapping --function-name google_home_proactive \\"
+  echo "        --event-source-arn \"\$STREAM_ARN\" --batch-size 10 \\"
+  echo "        --starting-position LATEST --region ${AWS_REGION}"
+  echo "    Repeat for ${DEVICE_STATE_TABLE}."
+  echo ""
+fi
+
+if [ "$DEPLOY_ALEXA" -eq 1 ]; then
+  echo -e "  ${BOLD}Alexa — DynamoDB Stream Triggers${NC}"
+  echo "    alexa_state_reporter:       stream on ${DEVICE_STATE_TABLE}"
+  echo "    alexa_proactive_discovery:  streams on ${USER_DEVICE_DETAILS_TABLE} + scene table"
+  echo "    (Same pattern as GH above — enable stream, then create-event-source-mapping)"
+  echo ""
+  echo -e "  ${BOLD}Alexa Fulfillment — Smart Home Lambda Trigger${NC}"
+  echo "    Add Alexa Smart Home trigger to alexa_fulfillment (region: ${ALEXA_FULFILLMENT_REGION}):"
+  echo "      aws lambda add-permission --function-name alexa_fulfillment \\"
+  echo "        --statement-id alexa-smart-home \\"
+  echo "        --action lambda:InvokeFunction \\"
+  echo "        --principal alexa-connectedhome.amazon.com \\"
+  echo "        --event-source-token ${ALEXA_SKILL_ID} \\"
+  echo "        --region ${ALEXA_FULFILLMENT_REGION}"
+  echo ""
+fi
 
 echo ""
