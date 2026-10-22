@@ -123,6 +123,17 @@ GH_TOKENS_ACCESS_TOKEN_INDEX=$(cfg GH_TOKENS_ACCESS_TOKEN_INDEX)
 GH_DEEP_LINK_BASE_URL=$(cfg GH_DEEP_LINK_BASE_URL)
 GH_DEEP_LINK_PATH=$(cfg GH_DEEP_LINK_PATH)
 GOOGLE_SA_KEY_SECRET_ARN=$(cfg GOOGLE_SA_KEY_SECRET_ARN)
+GH_SA_SECRET_ARN=$(cfg GH_SA_SECRET_ARN)
+GH_SA_SECRET_REGION=$(cfg GH_SA_SECRET_REGION)
+
+USER_DEVICE_DETAILS_TABLE=$(cfg USER_DEVICE_DETAILS_TABLE)
+DEVICE_STATE_TABLE=$(cfg DEVICE_STATE_TABLE)
+SCENE_TABLE=$(cfg SCENE_TABLE)
+SCENE_GSI_NAME=$(cfg SCENE_GSI_NAME)
+METADATA_BUCKET=$(cfg METADATA_BUCKET)
+ENDPOINT_KEY_SECRET_ARN=$(cfg ENDPOINT_KEY_SECRET_ARN)
+ENDPOINT_KEY_REGION=$(cfg ENDPOINT_KEY_REGION)
+DEVICE_MODEL=$(cfg DEVICE_MODEL)
 
 DEPLOY_ALEXA=0; DEPLOY_GOOGLE=0
 case "$DEPLOY_TARGET" in
@@ -198,7 +209,9 @@ if [ "$DEPLOY_GOOGLE" -eq 1 ]; then
   validate_required "GH_SESSIONS_TABLE"    "$GH_SESSIONS_TABLE"
   validate_required "GH_AUTH_CODES_TABLE"  "$GH_AUTH_CODES_TABLE"
   validate_required "GH_TOKENS_TABLE"      "$GH_TOKENS_TABLE"
-  validate_required "USER_DEVICE_MAPPING_TABLE" "$USER_DEVICE_MAPPING_TABLE"
+  validate_required "USER_DEVICE_DETAILS_TABLE" "$USER_DEVICE_DETAILS_TABLE"
+  validate_required "METADATA_BUCKET"           "$METADATA_BUCKET"
+  validate_required "ENDPOINT_KEY_SECRET_ARN"   "$ENDPOINT_KEY_SECRET_ARN"
   validate_required "APP_NAME"             "$APP_NAME"
   validate_required "DEVICE_MANUFACTURER"  "$DEVICE_MANUFACTURER"
 fi
@@ -743,7 +756,10 @@ _section "STEP 5b — GOOGLE HOME IAM ROLES"
 DDB_GH_SESSIONS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_SESSIONS_TABLE}"
 DDB_GH_CODES_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_AUTH_CODES_TABLE}"
 DDB_GH_TOKENS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${GH_TOKENS_TABLE}"
-DDB_DEVICE_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${USER_DEVICE_MAPPING_TABLE}"
+DDB_USER_DEVICE_DETAILS_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${USER_DEVICE_DETAILS_TABLE}"
+DDB_DEVICE_STATE_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${DEVICE_STATE_TABLE}"
+DDB_SCENE_ARN="arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${SCENE_TABLE}"
+S3_METADATA_ARN="arn:aws:s3:::${METADATA_BUCKET}"
 
 ROLE_GH_START_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-start-role" "{
   \"Version\":\"2012-10-17\",\"Statement\":[
@@ -804,7 +820,24 @@ ROLE_GH_TOKEN_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-token-role" "{
 ROLE_GH_FULFILLMENT_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-fulfillment-role" "{
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:Query\",\"dynamodb:DeleteItem\"],\"Resource\":[\"${DDB_GH_TOKENS_ARN}\",\"${DDB_GH_TOKENS_ARN}/index/*\"]},
-    {\"Sid\":\"DeviceMapping\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\"],\"Resource\":[\"${DDB_DEVICE_ARN}\",\"${DDB_DEVICE_ARN}/index/*\"]},
+    {\"Sid\":\"UserDevices\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_USER_DEVICE_DETAILS_ARN}\",\"${DDB_USER_DEVICE_DETAILS_ARN}/index/*\"]},
+    {\"Sid\":\"DeviceState\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_DEVICE_STATE_ARN}\",\"${DDB_DEVICE_STATE_ARN}/index/*\"]},
+    {\"Sid\":\"Scenes\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_SCENE_ARN}\",\"${DDB_SCENE_ARN}/index/*\"]},
+    {\"Sid\":\"Metadata\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"${S3_METADATA_ARN}\",\"${S3_METADATA_ARN}/*\"]},
+    {\"Sid\":\"EndpointKey\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${ENDPOINT_KEY_SECRET_ARN}\"},
+    {\"Sid\":\"IoTPublish\",\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\"],\"Resource\":\"arn:aws:iot:${AWS_REGION}:${ACCOUNT_ID}:topic/iot/device/*\"},
+    {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+  ]
+}")
+
+ROLE_GH_PROACTIVE_ARN=$(create_or_update_role "${ROLE_PREFIX}-gh-proactive-role" "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:Query\"],\"Resource\":[\"${DDB_GH_TOKENS_ARN}\",\"${DDB_GH_TOKENS_ARN}/index/*\"]},
+    {\"Sid\":\"UserDevices\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:Query\",\"dynamodb:GetItem\"],\"Resource\":[\"${DDB_USER_DEVICE_DETAILS_ARN}\",\"${DDB_USER_DEVICE_DETAILS_ARN}/index/*\"]},
+    {\"Sid\":\"Metadata\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"${S3_METADATA_ARN}\",\"${S3_METADATA_ARN}/*\"]},
+    {\"Sid\":\"EndpointKey\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${ENDPOINT_KEY_SECRET_ARN}\"},
+    {\"Sid\":\"SaKey\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${GH_SA_SECRET_ARN}\"},
+    {\"Sid\":\"DdbStream\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetRecords\",\"dynamodb:GetShardIterator\",\"dynamodb:DescribeStream\",\"dynamodb:ListStreams\"],\"Resource\":\"${DDB_USER_DEVICE_DETAILS_ARN}/stream/*\"},
     {\"Sid\":\"Logs\",${LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
   ]
 }")
@@ -880,8 +913,26 @@ deploy_lambda "google_home_fulfillment" "$ZIP" "$ROLE_GH_FULFILLMENT_ARN" \
   "$(env_json "${GH_COMMON[@]}" \
     "GH_TOKENS_TABLE=${GH_TOKENS_TABLE}" \
     "GH_TOKENS_ACCESS_TOKEN_INDEX=${GH_TOKENS_ACCESS_TOKEN_INDEX}" \
-    "USER_DEVICE_MAPPING_TABLE=${USER_DEVICE_MAPPING_TABLE}" \
-    "DEVICE_MANUFACTURER=${DEVICE_MANUFACTURER}")" 15
+    "USER_DEVICE_DETAILS_TABLE=${USER_DEVICE_DETAILS_TABLE}" \
+    "DEVICE_STATE_TABLE=${DEVICE_STATE_TABLE}" \
+    "SCENE_TABLE=${SCENE_TABLE}" \
+    "SCENE_GSI_NAME=${SCENE_GSI_NAME}" \
+    "METADATA_BUCKET=${METADATA_BUCKET}" \
+    "ENDPOINT_KEY_SECRET_ARN=${ENDPOINT_KEY_SECRET_ARN}" \
+    "ENDPOINT_KEY_REGION=${ENDPOINT_KEY_REGION}" \
+    "DEVICE_MANUFACTURER=${DEVICE_MANUFACTURER}" \
+    "DEVICE_MODEL=${DEVICE_MODEL}")" 15
+
+ZIP=$(package_lambda "google_home_proactive" "${LAMBDA_DIR}/google_home_proactive")
+deploy_lambda "google_home_proactive" "$ZIP" "$ROLE_GH_PROACTIVE_ARN" \
+  "$(env_json "${GH_COMMON[@]}" \
+    "GH_TOKENS_TABLE=${GH_TOKENS_TABLE}" \
+    "USER_DEVICE_DETAILS_TABLE=${USER_DEVICE_DETAILS_TABLE}" \
+    "METADATA_BUCKET=${METADATA_BUCKET}" \
+    "ENDPOINT_KEY_SECRET_ARN=${ENDPOINT_KEY_SECRET_ARN}" \
+    "ENDPOINT_KEY_REGION=${ENDPOINT_KEY_REGION}" \
+    "GH_SA_SECRET_ARN=${GH_SA_SECRET_ARN}" \
+    "GH_SA_SECRET_REGION=${GH_SA_SECRET_REGION}")" 30
 
 # ── Step 7b: API Gateway Routes ───────────────────────────────────────────────
 _section "STEP 7b — GOOGLE HOME API GATEWAY ROUTES"

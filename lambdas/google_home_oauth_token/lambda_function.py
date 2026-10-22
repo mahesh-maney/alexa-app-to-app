@@ -205,11 +205,23 @@ def _handle_authorization_code(params: dict, event: dict, request_id: str) -> di
 
     user_id = record.get("userId", "")
     scope   = record.get("scope", "profile")
+    ttl_remaining = int(record.get("ttl", 0)) - now
+
+    logger.debug(
+        "AUTH_CODE_VALID code=%s... userId=%s scope=%s stored_redirect=%s ttl_remaining=%ds request_id=%s",
+        code[:8], user_id, scope, stored_redirect, ttl_remaining, request_id,
+    )
+    logger.info("AUTH_CODE_ACCEPTED userId=%s code=%s... request_id=%s",
+                user_id, code[:8], request_id)
+    _audit("GH_TOKEN_CODE_VALID", code_prefix=code[:8], userId=user_id,
+           scope=scope, request_id=request_id)
 
     # Delete the code immediately (single-use)
     try:
         _ddb().Table(_AUTH_CODES_TABLE).delete_item(Key={"code": code})
         logger.debug("AUTH_CODE_DELETED code=%s...", code[:8])
+        logger.info("AUTH_CODE_CONSUMED_SINGLE_USE code=%s... userId=%s request_id=%s",
+                    code[:8], user_id, request_id)
     except ClientError as exc:
         logger.error("AUTH_CODE_DELETE_ERROR error=%s code=%s...", exc, code[:8])
         # Non-fatal — continue
@@ -219,6 +231,11 @@ def _handle_authorization_code(params: dict, event: dict, request_id: str) -> di
     refresh_token = _generate_token()
     expires_at    = now + _ACCESS_TOKEN_TTL_S
     linked_at     = str(now)
+
+    logger.debug(
+        "TOKENS_GENERATED access_token=%s... refresh_token=%s... expires_at=%d expires_in=%ds request_id=%s",
+        access_token[:8], refresh_token[:8], expires_at, _ACCESS_TOKEN_TTL_S, request_id,
+    )
 
     # Store in tokens table (PK: userId, with GSIs on accessToken + refreshToken)
     try:
@@ -231,14 +248,18 @@ def _handle_authorization_code(params: dict, event: dict, request_id: str) -> di
             "agentId":      _AGENT_ID,
             "scope":        scope,
         })
-        logger.info("TOKENS_STORED userId=%s expires_at=%d", user_id, expires_at)
+        logger.info("TOKENS_STORED userId=%s expires_at=%d linked_at=%s agent_id=%s scope=%s",
+                    user_id, expires_at, linked_at, _AGENT_ID, scope)
+        logger.debug("TOKENS_TABLE_WRITTEN table=%s userId=%s access_token=%s... refresh_token=%s...",
+                     _TOKENS_TABLE, user_id, access_token[:8], refresh_token[:8])
     except ClientError as exc:
         logger.error("TOKENS_STORE_ERROR error=%s userId=%s request_id=%s",
                      exc, user_id, request_id)
         return _oauth_error("server_error", "Failed to store tokens")
 
     _audit("GH_TOKEN_ISSUED", userId=user_id, grant=user_id,
-           access_token_prefix=access_token[:8], request_id=request_id)
+           access_token_prefix=access_token[:8], refresh_token_prefix=refresh_token[:8],
+           expires_at=expires_at, scope=scope, request_id=request_id)
 
     return _token_response(access_token, refresh_token, _ACCESS_TOKEN_TTL_S)
 
@@ -274,11 +295,25 @@ def _handle_refresh_token(params: dict, event: dict, request_id: str) -> dict:
     record  = items[0]
     user_id = record.get("userId", "")
     scope   = record.get("scope", "profile")
+    old_access_token = record.get("accessToken", "")
+    old_expires_at   = record.get("expiresAt", 0)
+
+    logger.debug(
+        "REFRESH_TOKEN_RECORD userId=%s scope=%s old_access_token=%s... old_expires_at=%d request_id=%s",
+        user_id, scope, old_access_token[:8] if old_access_token else "?",
+        old_expires_at, request_id,
+    )
+    logger.info("REFRESH_TOKEN_VALID userId=%s scope=%s request_id=%s",
+                user_id, scope, request_id)
+    _audit("GH_REFRESH_TOKEN_VALID", userId=user_id, scope=scope, request_id=request_id)
 
     # Issue a new access token (refresh token stays the same)
     now          = int(time.time())
     new_access   = _generate_token()
     expires_at   = now + _ACCESS_TOKEN_TTL_S
+
+    logger.debug("NEW_ACCESS_TOKEN_GENERATED token=%s... expires_at=%d expires_in=%ds request_id=%s",
+                 new_access[:8], expires_at, _ACCESS_TOKEN_TTL_S, request_id)
 
     try:
         _ddb().Table(_TOKENS_TABLE).update_item(
@@ -286,12 +321,16 @@ def _handle_refresh_token(params: dict, event: dict, request_id: str) -> dict:
             UpdateExpression="SET accessToken = :at, expiresAt = :ea",
             ExpressionAttributeValues={":at": new_access, ":ea": expires_at},
         )
-        logger.info("ACCESS_TOKEN_REFRESHED userId=%s expires_at=%d", user_id, expires_at)
+        logger.info("ACCESS_TOKEN_REFRESHED userId=%s new_token=%s... expires_at=%d",
+                    user_id, new_access[:8], expires_at)
+        logger.debug("TOKENS_TABLE_UPDATED table=%s userId=%s new_access_token=%s...",
+                     _TOKENS_TABLE, user_id, new_access[:8])
     except ClientError as exc:
         logger.error("TOKEN_REFRESH_UPDATE_ERROR error=%s userId=%s", exc, user_id)
         return _oauth_error("server_error", "Failed to refresh token")
 
-    _audit("GH_TOKEN_REFRESHED", userId=user_id, request_id=request_id)
+    _audit("GH_TOKEN_REFRESHED", userId=user_id, new_access_token_prefix=new_access[:8],
+           expires_at=expires_at, request_id=request_id)
 
     return _token_response(new_access, refresh_token, _ACCESS_TOKEN_TTL_S)
 
@@ -316,15 +355,23 @@ def lambda_handler(event, context):  # noqa: ANN001
         params = {}
 
     grant_type = params.get("grant_type", "").strip()
+    logger.debug("TOKEN_BODY_PARSED keys=%s grant_type=%s request_id=%s",
+                 list(params.keys()), grant_type, request_id)
     logger.info("TOKEN_REQUEST grant_type=%s request_id=%s", grant_type, request_id)
 
     # ── Validate client credentials ────────────────────────────────────────────
     client_id, client_secret = _parse_client_credentials(event, params)
+    logger.debug("CLIENT_CREDENTIALS_RECEIVED client_id=%s secret_present=%s request_id=%s",
+                 client_id, bool(client_secret), request_id)
     if not _validate_client_credentials(client_id, client_secret):
         _audit("GH_TOKEN_INVALID_CLIENT", client_id=client_id, request_id=request_id)
         return _oauth_error("invalid_client", "Invalid client credentials")
 
-    logger.debug("CLIENT_CREDENTIALS_OK client_id=%s", client_id)
+    logger.debug("CLIENT_CREDENTIALS_OK client_id=%s request_id=%s", client_id, request_id)
+    logger.info("CLIENT_AUTH_OK client_id=%s grant_type=%s request_id=%s",
+                client_id, grant_type, request_id)
+    _audit("GH_TOKEN_CLIENT_AUTH_OK", client_id=client_id, grant_type=grant_type,
+           request_id=request_id)
 
     # ── Dispatch grant type ────────────────────────────────────────────────────
     if grant_type == "authorization_code":

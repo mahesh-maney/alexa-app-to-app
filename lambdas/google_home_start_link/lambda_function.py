@@ -141,14 +141,18 @@ def _build_home_app_deep_link(agent_id: str) -> str:
     return url
 
 
-def _build_web_fallback_url(state: str) -> str:
-    """Build the web OAuth fallback URL for when the Google Home app is not installed."""
+def _build_web_fallback_url() -> str:
+    """Build the web OAuth fallback URL for when the Google Home app is not installed.
+
+    Points to the Cognito Hosted UI (auth.digilux.co.in/oauth2/authorize) — matching
+    what is registered in the Google Actions Console. pre_auth_state is not included
+    because the Cognito Hosted UI does not support it.
+    """
     if not _OAUTH_BASE_URL:
         logger.debug("WEB_FALLBACK_SKIPPED reason=OAUTH_BASE_URL_not_set")
         return ""
     params: dict[str, str] = {
-        "pre_auth_state": state,
-        "response_type":  "code",
+        "response_type": "code",
     }
     if _GH_CLIENT_ID:
         params["client_id"] = _GH_CLIENT_ID
@@ -161,7 +165,7 @@ def _build_web_fallback_url(state: str) -> str:
     if _GH_SCOPE:
         params["scope"] = _GH_SCOPE
     base = _OAUTH_BASE_URL.rstrip("/")
-    url = f"{base}/google-home/oauth/authorize?{urllib.parse.urlencode(params)}"
+    url = f"{base}/oauth2/authorize?{urllib.parse.urlencode(params)}"
     logger.debug(
         "WEB_FALLBACK_BUILT base=%s param_count=%d url_len=%d",
         base, len(params), len(url),
@@ -293,7 +297,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         _AGENT_ID, _OAUTH_BASE_URL, request_id,
     )
     home_app_deep_link = _build_home_app_deep_link(_AGENT_ID)
-    web_fallback_url   = _build_web_fallback_url(state)
+    web_fallback_url   = _build_web_fallback_url()
 
     logger.info(
         "URL_BUILD_OK home_app_deep_link_len=%d web_fallback_present=%s request_id=%s",
