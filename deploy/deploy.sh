@@ -75,6 +75,11 @@ DEPLOY_TARGET="${OVERRIDE_TARGET:-$(cfg DEPLOY_TARGET)}"
 ROLE_PREFIX=$(cfg ROLE_PREFIX)
 
 AWS_REGION=$(cfg AWS_REGION)
+# Region for the Alexa Smart Home fulfillment Lambda (Alexa calls it directly,
+# not via API Gateway). Indian customers route to eu-west-1 (Ireland).
+# Defaults to AWS_REGION when not set in config.
+ALEXA_FULFILLMENT_REGION=$(cfg ALEXA_FULFILLMENT_REGION)
+ALEXA_FULFILLMENT_REGION="${ALEXA_FULFILLMENT_REGION:-$AWS_REGION}"
 API_GATEWAY_ID=$(cfg API_GATEWAY_ID)
 API_STAGE=$(cfg API_STAGE)
 API_BASE_URL=$(cfg API_BASE_URL)
@@ -138,6 +143,7 @@ BUILD_DIR="/tmp/deploy_${ENV_LABEL}_build"
 _banner "DEPLOY — ${ENV_LABEL}  [target: ${DEPLOY_TARGET}]"
 _info "Config:    $CONFIG_FILE"
 _info "Region:    $AWS_REGION"
+_info "Alexa Fulfillment Region: $ALEXA_FULFILLMENT_REGION"
 _info "API Base:  $API_BASE_URL"
 
 # ── Step 1: Validate config — no FILL_IN values ───────────────────────────────
@@ -272,12 +278,14 @@ package_lambda() {
 }
 
 deploy_lambda() {
-  local NAME="$1" ZIP="$2" ROLE_ARN="$3" ENV_JSON="$4" TIMEOUT="${5:-15}"
-  if aws lambda get-function --function-name "$NAME" --region "$AWS_REGION" &>/dev/null; then
+  # 6th arg REGION overrides AWS_REGION — use for cross-region Lambdas
+  # (e.g. Alexa fulfillment in eu-west-1 while main region is us-east-1)
+  local NAME="$1" ZIP="$2" ROLE_ARN="$3" ENV_JSON="$4" TIMEOUT="${5:-15}" REGION="${6:-$AWS_REGION}"
+  if aws lambda get-function --function-name "$NAME" --region "$REGION" &>/dev/null; then
     aws lambda update-function-code \
       --function-name "$NAME" --zip-file "fileb://${ZIP}" \
-      --region "$AWS_REGION" --output text --query 'FunctionName' > /dev/null
-    aws lambda wait function-updated --function-name "$NAME" --region "$AWS_REGION"
+      --region "$REGION" --output text --query 'FunctionName' > /dev/null
+    aws lambda wait function-updated --function-name "$NAME" --region "$REGION"
     aws lambda update-function-configuration \
       --function-name "$NAME" \
       --role "$ROLE_ARN" \
@@ -285,9 +293,9 @@ deploy_lambda() {
       --memory-size 256 \
       --environment "$ENV_JSON" \
       --tracing-config Mode=Active \
-      --region "$AWS_REGION" --output text --query 'FunctionName' > /dev/null
-    aws lambda wait function-updated --function-name "$NAME" --region "$AWS_REGION"
-    _pass "Lambda $NAME updated"
+      --region "$REGION" --output text --query 'FunctionName' > /dev/null
+    aws lambda wait function-updated --function-name "$NAME" --region "$REGION"
+    _pass "Lambda $NAME updated (region: $REGION)"
   else
     aws lambda create-function \
       --function-name "$NAME" \
@@ -299,14 +307,14 @@ deploy_lambda() {
       --memory-size 256 \
       --environment "$ENV_JSON" \
       --tracing-config Mode=Active \
-      --region "$AWS_REGION" --output text --query 'FunctionName' > /dev/null
-    aws lambda wait function-active --function-name "$NAME" --region "$AWS_REGION"
-    _pass "Lambda $NAME created"
+      --region "$REGION" --output text --query 'FunctionName' > /dev/null
+    aws lambda wait function-active --function-name "$NAME" --region "$REGION"
+    _pass "Lambda $NAME created (region: $REGION)"
   fi
   aws logs put-retention-policy \
     --log-group-name "/aws/lambda/${NAME}" \
     --retention-in-days 30 \
-    --region "$AWS_REGION" 2>/dev/null || true
+    --region "$REGION" 2>/dev/null || true
 }
 
 env_json() {
@@ -463,6 +471,8 @@ smoke() {
 
 # Shared IAM policy fragments
 LOGS_STMT="\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Resource\":\"arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/*\""
+# Separate log policy for Lambdas deployed in ALEXA_FULFILLMENT_REGION
+FULFILLMENT_LOGS_STMT="\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Resource\":\"arn:aws:logs:${ALEXA_FULFILLMENT_REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/*\""
 XRAY_STMT="\"Effect\":\"Allow\",\"Action\":[\"xray:PutTraceSegments\",\"xray:PutTelemetryRecords\"],\"Resource\":\"*\""
 
 # ── Step 3: API Gateway ────────────────────────────────────────────────────────
@@ -669,6 +679,46 @@ wire_method GET    "$CALLBACK_ID"   "alexa_callback"           "NONE"
 wire_method POST   "$SKILL_EVT_ID"  "alexa_skill_events"       "NONE"
 
 _pass "Alexa API Gateway routes wired"
+
+# ── Step 8a-F: Alexa Fulfillment Lambda (ALEXA_FULFILLMENT_REGION) ────────────
+# This Lambda is called DIRECTLY by Alexa's backend (not via API Gateway).
+# For Indian customers, Alexa routes to eu-west-1 — it must live there.
+# Source: lambdas/alexa_fulfillment/  (add directory to deploy from source)
+_section "STEP 8a-F — ALEXA FULFILLMENT LAMBDA (${ALEXA_FULFILLMENT_REGION})"
+
+ALEXA_FULFILLMENT_SRC="${LAMBDA_DIR}/alexa_fulfillment"
+if [ -d "$ALEXA_FULFILLMENT_SRC" ]; then
+  ROLE_FULFILLMENT_ARN=$(create_or_update_role "${ROLE_PREFIX}-alexa-fulfillment-role" "{
+    \"Version\":\"2012-10-17\",\"Statement\":[
+      {\"Sid\":\"Tokens\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${ALEXA_TOKENS_TABLE}\"},
+      {\"Sid\":\"Secret\",\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"${LWA_SECRET_ARN}\"},
+      {\"Sid\":\"Kms\",\"Effect\":\"Allow\",\"Action\":[\"kms:Decrypt\"],\"Resource\":\"${KMS_KEY_ARN}\"},
+      {\"Sid\":\"Logs\",${FULFILLMENT_LOGS_STMT}},{\"Sid\":\"XRay\",${XRAY_STMT}}
+    ]
+  }")
+
+  ZIP=$(package_lambda "alexa_fulfillment" "$ALEXA_FULFILLMENT_SRC")
+  deploy_lambda "alexa_fulfillment" "$ZIP" "$ROLE_FULFILLMENT_ARN" \
+    "$(env_json \
+      "DATA_REGION=${AWS_REGION}" \
+      "LOG_LEVEL=${LOG_LEVEL}" \
+      "LWA_TOKENS_TABLE=${ALEXA_TOKENS_TABLE}" \
+      "LWA_SECRET_ARN=${LWA_SECRET_ARN}" \
+      "LWA_SECRET_REGION=${LWA_SECRET_REGION}" \
+      "KMS_KEY_ARN=${KMS_KEY_ARN}" \
+      "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}" \
+      "COGNITO_REGION=${COGNITO_REGION}")" \
+    30 "$ALEXA_FULFILLMENT_REGION"
+
+  _warn "Register this Lambda ARN in the Alexa Developer Console as the skill endpoint:"
+  _warn "  arn:aws:lambda:${ALEXA_FULFILLMENT_REGION}:${ACCOUNT_ID}:function:alexa_fulfillment"
+  _warn "Also add Alexa Smart Home trigger permission manually if not already present."
+else
+  _warn "lambdas/alexa_fulfillment/ not found — skipping fulfillment Lambda deploy"
+  _warn "Add source to lambdas/alexa_fulfillment/ to enable automated deployment"
+  _info "Current fulfillment Lambda ARN (if already deployed):"
+  _info "  arn:aws:lambda:${ALEXA_FULFILLMENT_REGION}:${ACCOUNT_ID}:function:alexa_fulfillment"
+fi
 
 fi  # end DEPLOY_ALEXA
 
