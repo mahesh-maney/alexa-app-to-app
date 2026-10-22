@@ -224,7 +224,7 @@ def ensure_role(iam, role_name: str, inline_policy: dict) -> tuple:
         role_arn = iam.get_role(RoleName=role_name)["Role"]["Arn"]
         log_skip(f"Role exists — updating policy  arn={role_arn}")
     except ClientError as e:
-        if e.response["Error"]["Code"] != "NoSuchEntityException":
+        if e.response["Error"]["Code"] != "NoSuchEntity":
             raise
         log_create(f"Role not found — creating {role_name}...")
         role_arn = iam.create_role(
