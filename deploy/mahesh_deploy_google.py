@@ -155,6 +155,7 @@ def _lambda_env(fn_name: str, c: dict, derived: dict) -> dict:
     if fn_name == "google_home_oauth_cognito_callback":
         return {**base,
                 "COGNITO_CLIENT_ID":           cfg(c, "COGNITO_CLIENT_ID"),
+                "COGNITO_CLIENT_SECRET":       cfg(c, "COGNITO_CLIENT_SECRET", ""),
                 "COGNITO_HOSTED_UI_DOMAIN":    cfg(c, "COGNITO_HOSTED_UI_DOMAIN"),
                 "COGNITO_CALLBACK_URI":        derived["COGNITO_CALLBACK_URI"],
                 "GH_OAUTH_TRANSACTIONS_TABLE": cfg(c, "GH_OAUTH_TRANSACTIONS_TABLE"),
