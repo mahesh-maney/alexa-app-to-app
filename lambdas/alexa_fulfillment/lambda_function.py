@@ -103,11 +103,36 @@ def _get_lambda_client():
     return _lambda_client
 
 
-def _notify_alexa_enabled_all_sites(user_id: str) -> None:
+def _notify_alexa_enabled(user_id: str, site_id: str) -> None:
+    """Invoke CREATE_UPDATE_FN async to set isAlexaEnabled=true for one site."""
+    try:
+        _get_lambda_client().invoke(
+            FunctionName=_CREATE_UPDATE_FN,
+            InvocationType="Event",
+            Payload=json.dumps({
+                "userId":         user_id,
+                "siteId":         site_id,
+                "isAlexaEnabled": True,
+            }).encode(),
+        )
+        logger.info("AcceptGrant: isAlexaEnabled=true sent userId=%s siteId=%s", user_id, site_id)
+    except Exception as exc:
+        logger.warning("AcceptGrant: notify failed userId=%s siteId=%s error=%s", user_id, site_id, exc)
+
+
+def _notify_alexa_enabled_on_accept_grant(user_id: str) -> None:
     """
-    After AcceptGrant (standard Alexa account linking from Alexa app/web/voice),
-    set isAlexaEnabled=true on all sites belonging to this user by invoking
-    CREATE_UPDATE_FN async for each site. Non-fatal — failure is logged only.
+    After AcceptGrant, set isAlexaEnabled=true on the correct site(s).
+
+    Strategy:
+      1. Query user_device_details for all site records of this user.
+      2. Find the record with siteSelected=true — set by the Flutter app when
+         the user picks a site before initiating Alexa linking.
+      3. If found → enable only that site (targeted).
+      4. If not found (user linked directly from Alexa app/web/voice without
+         going through Flutter first) → enable all sites (safe fallback).
+
+    Non-fatal — failure is logged only, linking is already complete.
     """
     if not _CREATE_UPDATE_FN:
         logger.warning("AcceptGrant: CREATE_UPDATE_FN not set — skipping isAlexaEnabled update")
@@ -119,23 +144,21 @@ def _notify_alexa_enabled_all_sites(user_id: str) -> None:
     except Exception as exc:
         logger.warning("AcceptGrant: failed to query sites for userId=%s error=%s", user_id, exc)
         return
-    for site in sites:
-        site_id = site.get("siteId", "")
-        if not site_id:
-            continue
-        try:
-            _get_lambda_client().invoke(
-                FunctionName=_CREATE_UPDATE_FN,
-                InvocationType="Event",
-                Payload=json.dumps({
-                    "userId":         user_id,
-                    "siteId":         site_id,
-                    "isAlexaEnabled": True,
-                }).encode(),
-            )
-            logger.info("AcceptGrant: isAlexaEnabled=true sent userId=%s siteId=%s", user_id, site_id)
-        except Exception as exc:
-            logger.warning("AcceptGrant: notify failed userId=%s siteId=%s error=%s", user_id, site_id, exc)
+
+    selected = [s for s in sites if s.get("siteSelected") and s.get("siteId")]
+
+    if selected:
+        logger.info("AcceptGrant: siteSelected found — enabling %d site(s) for userId=%s",
+                    len(selected), user_id)
+        for site in selected:
+            _notify_alexa_enabled(user_id, site["siteId"])
+    else:
+        logger.info("AcceptGrant: siteSelected not set — enabling all %d site(s) for userId=%s "
+                    "(fallback: user linked without Flutter context)", len(sites), user_id)
+        for site in sites:
+            site_id = site.get("siteId", "")
+            if site_id:
+                _notify_alexa_enabled(user_id, site_id)
 
 
 def _get_lwa_creds() -> tuple[str, str]:
@@ -680,7 +703,7 @@ def handle_accept_grant(directive: dict) -> dict:
     })
     logger.info("LWA tokens stored for userId=%s", user_id)
 
-    _notify_alexa_enabled_all_sites(user_id)
+    _notify_alexa_enabled_on_accept_grant(user_id)
 
     return {
         "event": {
