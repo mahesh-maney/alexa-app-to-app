@@ -124,7 +124,9 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "USER_DEVICE_MAPPING_TABLE": cfg(c, "USER_DEVICE_MAPPING_TABLE"),
                 "LWA_SECRET_ARN": cfg(c, "LWA_SECRET_ARN"),
                 "LWA_SECRET_REGION": cfg(c, "LWA_SECRET_REGION"),
-                "KMS_KEY_ARN": kms_key_arn}
+                "KMS_KEY_ARN": kms_key_arn,
+                "COGNITO_USER_POOL_ID": cfg(c, "COGNITO_USER_POOL_ID"),
+                "COGNITO_REGION": cfg(c, "COGNITO_REGION")}
     if fn_name == "alexa_skill_server_events":
         return {**base,
                 "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
