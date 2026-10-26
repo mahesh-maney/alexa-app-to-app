@@ -110,6 +110,7 @@ def _notify_alexa_enabled(user_id: str, site_id: str) -> None:
             FunctionName=_CREATE_UPDATE_FN,
             InvocationType="Event",
             Payload=json.dumps({
+                "_source":        "alexa_internal",
                 "userId":         user_id,
                 "siteId":         site_id,
                 "isAlexaEnabled": True,
