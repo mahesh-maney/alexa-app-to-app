@@ -50,6 +50,7 @@ _USER_DEVICE_TABLE  = os.environ.get("USER_DEVICE_DETAILS_TABLE", "user_device_d
 _SCENE_TABLE        = os.environ.get("SCENE_TABLE",               "digilux_scene_data")
 _DEVICE_STATE_TABLE = os.environ.get("DEVICE_STATE_TABLE",        "device_state")
 _METADATA_BUCKET    = os.environ.get("METADATA_BUCKET",           "digilux-metadata-bucket")
+_CREATE_UPDATE_FN   = os.environ.get("CREATE_UPDATE_FN",          "")
 
 _TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 _GATEWAY_URL = os.environ.get("ALEXA_GATEWAY_URL", "https://api.eu.amazonalexa.com/v3/events")
@@ -69,6 +70,7 @@ _dynamodb = None
 _s3 = None
 _iot = None
 _bridge_cache: dict = {}  # {duid: bridge_addr} — warm across invocations
+_lambda_client = None
 
 
 # ── AWS clients ───────────────────────────────────────────────────────────────
@@ -92,6 +94,48 @@ def _iot_client():
     if _iot is None:
         _iot = boto3.client("iot-data", region_name=_DATA_REGION)
     return _iot
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_DATA_REGION)
+    return _lambda_client
+
+
+def _notify_alexa_enabled_all_sites(user_id: str) -> None:
+    """
+    After AcceptGrant (standard Alexa account linking from Alexa app/web/voice),
+    set isAlexaEnabled=true on all sites belonging to this user by invoking
+    CREATE_UPDATE_FN async for each site. Non-fatal — failure is logged only.
+    """
+    if not _CREATE_UPDATE_FN:
+        logger.warning("AcceptGrant: CREATE_UPDATE_FN not set — skipping isAlexaEnabled update")
+        return
+    try:
+        sites = _ddb().Table(_USER_DEVICE_TABLE).query(
+            KeyConditionExpression=Key("userId").eq(user_id)
+        ).get("Items", [])
+    except Exception as exc:
+        logger.warning("AcceptGrant: failed to query sites for userId=%s error=%s", user_id, exc)
+        return
+    for site in sites:
+        site_id = site.get("siteId", "")
+        if not site_id:
+            continue
+        try:
+            _get_lambda_client().invoke(
+                FunctionName=_CREATE_UPDATE_FN,
+                InvocationType="Event",
+                Payload=json.dumps({
+                    "userId":         user_id,
+                    "siteId":         site_id,
+                    "isAlexaEnabled": True,
+                }).encode(),
+            )
+            logger.info("AcceptGrant: isAlexaEnabled=true sent userId=%s siteId=%s", user_id, site_id)
+        except Exception as exc:
+            logger.warning("AcceptGrant: notify failed userId=%s siteId=%s error=%s", user_id, site_id, exc)
 
 
 def _get_lwa_creds() -> tuple[str, str]:
@@ -635,6 +679,8 @@ def handle_accept_grant(directive: dict) -> dict:
         "expiresAt":    0,  # force immediate refresh on first proactive call
     })
     logger.info("LWA tokens stored for userId=%s", user_id)
+
+    _notify_alexa_enabled_all_sites(user_id)
 
     return {
         "event": {

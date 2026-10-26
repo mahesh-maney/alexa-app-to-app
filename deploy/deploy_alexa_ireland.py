@@ -202,6 +202,7 @@ def step5_deploy(session, c: dict, role_arn: str, zip_path: str,
         "DEVICE_TABLE_SECRET_REGION":cfg(c, "DEVICE_TABLE_SECRET_REGION"),
         "ALEXA_GATEWAY_URL":         cfg(c, "ALEXA_GATEWAY_URL"),
         "IOT_DATA_ENDPOINT":         cfg(c, "IOT_DATA_ENDPOINT"),
+        "CREATE_UPDATE_FN":          cfg(c, "CREATE_UPDATE_FN"),
     }
 
     arn = deploy_lambda(session, "alexa_fulfillment", zip_path, role_arn,

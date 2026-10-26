@@ -85,7 +85,7 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "REDIRECT_URI": cfg(c, "ALEXA_REDIRECT_URI"),
                 "ALLOWED_REDIRECT_HOSTS": cfg(c, "ALEXA_REDIRECT_HOSTS"),
                 "KMS_KEY_ARN": kms_key_arn,
-                "ALEXA_SESSION_TTL_SECONDS": cfg(c, "ALEXA_SESSION_TTL_SECONDS")}
+                "SESSION_TTL_SECONDS": cfg(c, "ALEXA_SESSION_TTL_SECONDS")}
     if fn_name == "alexa_complete_app_to_app":
         return {**base,
                 "COGNITO_USER_POOL_ID": cfg(c, "COGNITO_USER_POOL_ID"),
@@ -109,6 +109,8 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "APP_SCHEME": cfg(c, "APP_DEEP_LINK_SCHEME")}
     if fn_name == "alexa_app_to_app_unlink":
         return {**base,
+                "COGNITO_USER_POOL_ID": cfg(c, "COGNITO_USER_POOL_ID"),
+                "COGNITO_REGION": cfg(c, "COGNITO_REGION"),
                 "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
                 "USER_DEVICE_MAPPING_TABLE": cfg(c, "USER_DEVICE_MAPPING_TABLE"),
                 "LWA_SECRET_ARN": cfg(c, "LWA_SECRET_ARN"),
@@ -120,13 +122,14 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "SKILL_ENABLEMENT_URL": cfg(c, "SKILL_ENABLEMENT_URL")}
     if fn_name == "alexa_link_status":
         return {**base,
+                "COGNITO_USER_POOL_ID": cfg(c, "COGNITO_USER_POOL_ID"),
+                "COGNITO_REGION": cfg(c, "COGNITO_REGION"),
                 "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
                 "USER_DEVICE_MAPPING_TABLE": cfg(c, "USER_DEVICE_MAPPING_TABLE"),
+                "USER_DEVICE_DETAILS_TABLE": cfg(c, "USER_DEVICE_DETAILS_TABLE"),
                 "LWA_SECRET_ARN": cfg(c, "LWA_SECRET_ARN"),
                 "LWA_SECRET_REGION": cfg(c, "LWA_SECRET_REGION"),
-                "KMS_KEY_ARN": kms_key_arn,
-                "COGNITO_USER_POOL_ID": cfg(c, "COGNITO_USER_POOL_ID"),
-                "COGNITO_REGION": cfg(c, "COGNITO_REGION")}
+                "KMS_KEY_ARN": kms_key_arn}
     if fn_name == "alexa_skill_server_events":
         return {**base,
                 "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
@@ -171,7 +174,8 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "DEVICE_TABLE_SECRET_ARN": cfg(c, "DEVICE_TABLE_SECRET_ARN"),
                 "DEVICE_TABLE_SECRET_REGION": cfg(c, "DEVICE_TABLE_SECRET_REGION"),
                 "ALEXA_GATEWAY_URL": cfg(c, "ALEXA_GATEWAY_URL"),
-                "IOT_DATA_ENDPOINT": cfg(c, "IOT_DATA_ENDPOINT")}
+                "IOT_DATA_ENDPOINT": cfg(c, "IOT_DATA_ENDPOINT"),
+                "CREATE_UPDATE_FN":  cfg(c, "CREATE_UPDATE_FN")}
     raise ValueError(f"Unknown Alexa Lambda: {fn_name}")
 
 
