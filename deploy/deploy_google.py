@@ -101,7 +101,7 @@ def _lambda_env(fn_name: str, c: dict, derived: dict) -> dict:
         return {**base,
                 "GH_TOKENS_TABLE": cfg(c, "GH_TOKENS_TABLE"),
                 "GOOGLE_SECRET_REGION": cfg(c, "GOOGLE_SECRET_REGION"),
-                "GOOGLE_SA_KEY_SECRET_ARN": cfg(c, "GOOGLE_SA_KEY_SECRET_ARN")}
+                "GOOGLE_SA_KEY_SECRET_ARN": cfg(c, "GH_SA_SECRET_ARN")}
     if fn_name == "google_home_oauth_authorize":
         return {**base,
                 "GOOGLE_CLIENT_ID": cfg(c, "GOOGLE_CLIENT_ID"),
@@ -201,9 +201,9 @@ def step2_preflight(session, c: dict) -> str:
     account_id = preflight_aws(session)
     verify_secret_accessible(session, cfg(c, "GOOGLE_SECRET_ARN"),
                              cfg(c, "GOOGLE_SECRET_REGION"), "GOOGLE_SECRET_ARN")
-    if cfg(c, "GOOGLE_SA_KEY_SECRET_ARN"):
-        verify_secret_accessible(session, cfg(c, "GOOGLE_SA_KEY_SECRET_ARN"),
-                                 cfg(c, "GH_SA_SECRET_REGION"), "GOOGLE_SA_KEY_SECRET_ARN")
+    if cfg(c, "GH_SA_SECRET_ARN"):
+        verify_secret_accessible(session, cfg(c, "GH_SA_SECRET_ARN"),
+                                 cfg(c, "GH_SA_SECRET_REGION"), "GH_SA_SECRET_ARN")
     log_warn("Verify GOOGLE_SECRET_ARN client_secret EXACTLY matches Google Console")
     log_warn("  → A mismatch causes token exchange failures and a 24–48h backoff in Google's OAuth system")
     return account_id
@@ -301,8 +301,7 @@ def step5_iam(session, c: dict, account_id: str) -> dict:
             st_ddb(["dynamodb:GetItem"], account_id, region, gh_tokens), cw, xr)),
         (f"{role_pre}-gh-unlink-role", make_policy(
             st_ddb(["dynamodb:GetItem", "dynamodb:DeleteItem"], account_id, region, gh_tokens),
-            st_sm(*([goog_secret] + ([cfg(c, "GOOGLE_SA_KEY_SECRET_ARN")]
-                                     if cfg(c, "GOOGLE_SA_KEY_SECRET_ARN") else []))),
+            st_sm(goog_secret, gh_sa_arn),
             cw, xr)),
         (f"{role_pre}-gh-authorize-role", make_policy(
             st_ddb(["dynamodb:PutItem"], account_id, region, gh_txn), cw, xr)),
