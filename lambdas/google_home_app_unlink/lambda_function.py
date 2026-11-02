@@ -92,7 +92,11 @@ def _ddb():
 def _sm():
     global _sm_cache
     if _sm_cache is None:
-        region = _GH_SECRET_REGION or _REGION
+        # A full secret ARN identifies its owning region. The OAuth client
+        # secret may be in a different region from the service-account key.
+        region = (_GH_SA_KEY_SECRET_ARN.split(":")[3]
+                  if _GH_SA_KEY_SECRET_ARN.startswith("arn:")
+                  else _GH_SECRET_REGION or _REGION)
         logger.debug("SM_CLIENT_INIT region=%s (cold start)", region)
         _sm_cache = boto3.client("secretsmanager", region_name=region)
         logger.info("SM_CLIENT_READY region=%s", region)
@@ -397,6 +401,9 @@ def lambda_handler(event, context):  # noqa: ANN001
 
     # Idempotent: already unlinked
     if not record:
+        # A previous attempt may have removed the local marker while Google
+        # cleanup failed. Retry that cleanup rather than silently skipping it.
+        _delete_agent_user(user_id)
         logger.info(
             "UNLINK_ALREADY_UNLINKED userId=%s — no token record found request_id=%s",
             user_id, request_id,
