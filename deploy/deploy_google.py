@@ -49,7 +49,7 @@ REQUIRED_KEYS = [
     "SCENE_GSI_NAME", "METADATA_BUCKET",
     "ENDPOINT_KEY_SECRET_ARN", "ENDPOINT_KEY_REGION",
     "GH_SA_SECRET_ARN", "GH_SA_SECRET_REGION",
-    "DEVICE_MANUFACTURER", "DEVICE_MODEL", "IOT_DATA_ENDPOINT",
+    "DEVICE_MANUFACTURER", "DEVICE_MODEL", "IOT_DATA_ENDPOINT", "CREATE_UPDATE_FN",
     "DEVICE_TABLE_SECRET_ARN", "DEVICE_TABLE_SECRET_REGION",
     "APP_NAME", "BRAND_TITLE", "BRAND_SUBTITLE", "TERMS_URL", "PRIVACY_POLICY_URL",
     "LOG_LEVEL", "SESSION_TTL_SECONDS", "AUTH_CODE_TTL_SECONDS",
@@ -92,7 +92,8 @@ def _lambda_env(fn_name: str, c: dict, derived: dict) -> dict:
     if fn_name == "google_home_app_link_complete":
         return {**base,
                 "GH_SESSIONS_TABLE": cfg(c, "GH_SESSIONS_TABLE"),
-                "GH_TOKENS_TABLE": cfg(c, "GH_TOKENS_TABLE")}
+                "GH_TOKENS_TABLE": cfg(c, "GH_TOKENS_TABLE"),
+                "CREATE_UPDATE_FN": cfg(c, "CREATE_UPDATE_FN")}
     if fn_name == "google_home_link_status":
         return {**base,
                 "GH_TOKENS_TABLE": cfg(c, "GH_TOKENS_TABLE"),
@@ -101,7 +102,8 @@ def _lambda_env(fn_name: str, c: dict, derived: dict) -> dict:
         return {**base,
                 "GH_TOKENS_TABLE": cfg(c, "GH_TOKENS_TABLE"),
                 "GOOGLE_SECRET_REGION": cfg(c, "GOOGLE_SECRET_REGION"),
-                "GOOGLE_SA_KEY_SECRET_ARN": cfg(c, "GH_SA_SECRET_ARN")}
+                "GOOGLE_SA_KEY_SECRET_ARN": cfg(c, "GH_SA_SECRET_ARN"),
+                "CREATE_UPDATE_FN": cfg(c, "CREATE_UPDATE_FN")}
     if fn_name == "google_home_oauth_authorize":
         return {**base,
                 "GOOGLE_CLIENT_ID": cfg(c, "GOOGLE_CLIENT_ID"),
@@ -154,7 +156,8 @@ def _lambda_env(fn_name: str, c: dict, derived: dict) -> dict:
                 "ENDPOINT_KEY_SECRET_ARN": cfg(c, "ENDPOINT_KEY_SECRET_ARN"),
                 "ENDPOINT_KEY_REGION": cfg(c, "ENDPOINT_KEY_REGION"),
                 "DEVICE_MANUFACTURER": cfg(c, "DEVICE_MANUFACTURER"),
-                "DEVICE_MODEL": cfg(c, "DEVICE_MODEL")}
+                "DEVICE_MODEL": cfg(c, "DEVICE_MODEL"),
+                "CREATE_UPDATE_FN": cfg(c, "CREATE_UPDATE_FN")}
     if fn_name == "google_home_proactive":
         return {**base,
                 "GH_TOKENS_TABLE": cfg(c, "GH_TOKENS_TABLE"),

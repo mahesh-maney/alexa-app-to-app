@@ -62,6 +62,7 @@ _KEY_SECRET_REGION         = os.environ.get("ENDPOINT_KEY_REGION", "eu-west-1")
 _DEVICE_MANUFACTURER       = os.environ.get("DEVICE_MANUFACTURER", "Digilux")
 _DEVICE_MODEL              = os.environ.get("DEVICE_MODEL", "Digilux Smart Device")
 _SCENE_GSI_NAME            = os.environ.get("SCENE_GSI_NAME", "GSI_scene")
+_CREATE_UPDATE_FN          = os.environ.get("CREATE_UPDATE_FN", "")
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
@@ -98,6 +99,7 @@ _s3: object | None = None
 _iot: object | None = None
 _endpoint_key: bytes | None = None
 _bridge_cache: dict = {}
+_lambda_client: object | None = None
 
 
 # ── AWS clients ────────────────────────────────────────────────────────────────
@@ -928,21 +930,84 @@ def _handle_execute(payload: dict, user_id: str, request_id: str) -> dict:
     }
 
 
+def _notify_google_enabled(user_id: str, site_id: str, is_enabled: bool) -> None:
+    """
+    Async fire-and-forget: tell create_and_update_data_function to set
+    isGoogleEnabled on the site record in the user device details table.
+    Non-fatal — failure is logged; disconnect is already complete.
+    """
+    if not _CREATE_UPDATE_FN or not site_id:
+        return
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_REGION)
+    payload_bytes = json.dumps({
+        "_source":         "google_home_internal",
+        "userId":          user_id,
+        "siteId":          site_id,
+        "isGoogleEnabled": is_enabled,
+    }).encode()
+    try:
+        _lambda_client.invoke(
+            FunctionName=_CREATE_UPDATE_FN,
+            InvocationType="Event",
+            Payload=payload_bytes,
+        )
+        logger.info(
+            "GOOGLE_ENABLED_NOTIFY_SENT fn=%s userId=%s siteId=%s isGoogleEnabled=%s",
+            _CREATE_UPDATE_FN, user_id, site_id, is_enabled,
+        )
+    except Exception as exc:
+        logger.warning(
+            "GOOGLE_ENABLED_NOTIFY_FAILED fn=%s userId=%s siteId=%s error=%s",
+            _CREATE_UPDATE_FN, user_id, site_id, exc,
+        )
+
+
 def _handle_disconnect(payload: dict, user_id: str, request_id: str) -> dict:
     """
-    User disconnected from Google Home. Delete the token record to unlink.
-    This is Google's reliable disconnect intent — always fires when user removes
-    the integration from Google Home.
+    User disconnected from Google Home. Read the token record to recover siteId,
+    delete the record, then notify create_and_update_data_function to clear
+    isGoogleEnabled on the site. This is Google's reliable disconnect intent —
+    always fires when user removes the integration from Google Home.
     """
     logger.info("INTENT_DISCONNECT userId=%s request_id=%s", user_id, request_id)
+
+    # ── 1. Read token record to recover siteId before deleting ─────────────────
+    site_id = ""
+    try:
+        record  = _ddb().Table(_TOKENS_TABLE).get_item(Key={"userId": user_id}).get("Item") or {}
+        site_id = record.get("siteId", "")
+        logger.info(
+            "GH_DISCONNECT_RECORD userId=%s siteId=%s request_id=%s",
+            user_id, site_id or "(none)", request_id,
+        )
+    except ClientError as exc:
+        logger.warning(
+            "GH_DISCONNECT_RECORD_READ_ERROR userId=%s error=%s — proceeding with delete",
+            user_id, exc,
+        )
+
+    # ── 2. Delete token record ──────────────────────────────────────────────────
     try:
         _ddb().Table(_TOKENS_TABLE).delete_item(Key={"userId": user_id})
-        logger.info("GH_DISCONNECT_OK userId=%s", user_id)
+        logger.info("GH_DISCONNECT_OK userId=%s request_id=%s", user_id, request_id)
         _audit("GH_DISCONNECT", userId=user_id, outcome="success", request_id=request_id)
     except ClientError as exc:
         logger.error("GH_DISCONNECT_DDB_ERROR error=%s userId=%s", exc, user_id)
         _audit("GH_DISCONNECT", userId=user_id, outcome="error", error=str(exc),
                request_id=request_id)
+
+    # ── 3. Notify isGoogleEnabled = false ───────────────────────────────────────
+    if site_id:
+        _notify_google_enabled(user_id, site_id, False)
+    else:
+        logger.warning(
+            "GH_DISCONNECT_SITE_ID_MISSING userId=%s — isGoogleEnabled not updated; "
+            "siteId was not stored in the token record at link time",
+            user_id,
+        )
+
     return {"requestId": request_id, "payload": {}}
 
 

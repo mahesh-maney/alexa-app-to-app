@@ -240,7 +240,21 @@ def lambda_handler(event, context):  # noqa: ANN001
                request_id=request_id)
         return _resp(401, {"error": "Unauthorized"})
 
-    # ── 2. Generate session state (CSRF token) ─────────────────────────────────
+    # ── 2. Parse optional request body ────────────────────────────────────────
+    body_raw = event.get("body") or "{}"
+    try:
+        body    = json.loads(body_raw)
+        site_id = str(body.get("siteId", "")).strip()
+    except Exception:
+        site_id = ""
+
+    if site_id:
+        logger.debug(
+            "BODY_SITE_ID userId=%s siteId=%s request_id=%s",
+            user_id, site_id, request_id,
+        )
+
+    # ── 3. Generate session state (CSRF token) ─────────────────────────────────
     state = str(uuid.uuid4())
     now   = int(time.time())
     expires_at = now + _SESSION_TTL_S
@@ -251,7 +265,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         user_id, state, now, expires_at, _SESSION_TTL_S, request_id,
     )
 
-    # ── 3. Persist session in DynamoDB ─────────────────────────────────────────
+    # ── 4. Persist session in DynamoDB ─────────────────────────────────────────
     session_item = {
         "state":     state,
         "userId":    user_id,
@@ -259,6 +273,8 @@ def lambda_handler(event, context):  # noqa: ANN001
         "createdAt": now,
         "ttl":       expires_at,
     }
+    if site_id:
+        session_item["siteId"] = site_id
     logger.debug(
         "DDB_PUT_START table=%s userId=%s state=%s request_id=%s",
         _SESSIONS_TABLE, user_id, state, request_id,
@@ -291,7 +307,7 @@ def lambda_handler(event, context):  # noqa: ANN001
                error="unexpected", request_id=request_id)
         return _resp(500, {"error": "Failed to create linking session"})
 
-    # ── 4. Build response URLs ─────────────────────────────────────────────────
+    # ── 5. Build response URLs ─────────────────────────────────────────────────
     logger.debug(
         "BUILDING_URLS agent_id=%s oauth_base=%s request_id=%s",
         _AGENT_ID, _OAUTH_BASE_URL, request_id,

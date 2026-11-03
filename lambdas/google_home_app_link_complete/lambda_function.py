@@ -33,9 +33,10 @@ def _audit(event: str, **fields) -> None:
 
 
 # ── Environment variables ──────────────────────────────────────────────────────
-_REGION         = os.environ.get("DATA_REGION", "")
-_SESSIONS_TABLE = os.environ.get("GH_SESSIONS_TABLE", "google_home_link_sessions")
-_TOKENS_TABLE   = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
+_REGION           = os.environ.get("DATA_REGION", "")
+_SESSIONS_TABLE   = os.environ.get("GH_SESSIONS_TABLE", "google_home_link_sessions")
+_TOKENS_TABLE     = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
+_CREATE_UPDATE_FN = os.environ.get("CREATE_UPDATE_FN", "")
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
@@ -55,7 +56,8 @@ else:
     )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
-_dynamodb = None
+_dynamodb      = None
+_lambda_client = None
 
 
 def _ddb():
@@ -67,6 +69,40 @@ def _ddb():
     else:
         logger.debug("DDB_CLIENT_REUSE (warm container)")
     return _dynamodb
+
+
+def _notify_google_enabled(user_id: str, site_id: str, is_enabled: bool) -> None:
+    """
+    Async fire-and-forget: tell create_and_update_data_function to set
+    isGoogleEnabled on the site record in the user device details table.
+    Non-fatal — failure is logged; linking is already confirmed complete.
+    """
+    if not _CREATE_UPDATE_FN or not site_id:
+        return
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_REGION)
+    payload = json.dumps({
+        "_source":         "google_home_internal",
+        "userId":          user_id,
+        "siteId":          site_id,
+        "isGoogleEnabled": is_enabled,
+    }).encode()
+    try:
+        _lambda_client.invoke(
+            FunctionName=_CREATE_UPDATE_FN,
+            InvocationType="Event",   # async — does not block response
+            Payload=payload,
+        )
+        logger.info(
+            "GOOGLE_ENABLED_NOTIFY_SENT fn=%s userId=%s siteId=%s isGoogleEnabled=%s",
+            _CREATE_UPDATE_FN, user_id, site_id, is_enabled,
+        )
+    except Exception as exc:
+        logger.warning(
+            "GOOGLE_ENABLED_NOTIFY_FAILED fn=%s userId=%s siteId=%s error=%s",
+            _CREATE_UPDATE_FN, user_id, site_id, exc,
+        )
 
 
 def _decode_jwt_sub(token: str) -> str:
@@ -217,6 +253,7 @@ def lambda_handler(event, context):  # noqa: ANN001
     session_status  = session.get("status", "")
     session_created = session.get("createdAt", 0)
     session_ttl     = int(session.get("ttl", 0))
+    site_id         = session.get("siteId", "")
 
     logger.debug(
         "SESSION_FOUND state=%s... session_userId=%s session_status=%s "
@@ -287,6 +324,33 @@ def lambda_handler(event, context):  # noqa: ANN001
     agent_id  = (token_record or {}).get("agentId", "")
     linked_at = int((token_record or {}).get("linkedAt", 0)) or ""
     scope     = (token_record or {}).get("scope", "")
+
+    if linked:
+        if site_id:
+            # Persist siteId into the linked marker so _handle_disconnect can read it back
+            try:
+                _ddb().Table(_TOKENS_TABLE).update_item(
+                    Key={"userId": user_id},
+                    UpdateExpression="SET siteId = :s",
+                    ExpressionAttributeValues={":s": site_id},
+                )
+                logger.info(
+                    "GH_TOKENS_SITE_ID_UPDATED userId=%s siteId=%s request_id=%s",
+                    user_id, site_id, request_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "GH_TOKENS_SITE_ID_UPDATE_FAILED userId=%s siteId=%s error=%s "
+                    "— isGoogleEnabled notify will still be attempted",
+                    user_id, site_id, exc,
+                )
+            _notify_google_enabled(user_id, site_id, True)
+        else:
+            logger.warning(
+                "GH_COMPLETE_SITE_ID_MISSING userId=%s — isGoogleEnabled not updated; "
+                "Flutter app must send siteId in the /start request",
+                user_id,
+            )
 
     logger.info(
         "GH_LINK_STATUS userId=%s linked=%s agent_id=%s linked_at=%s request_id=%s",

@@ -40,12 +40,13 @@ def _audit(event: str, **fields) -> None:
 
 
 # ── Environment variables ──────────────────────────────────────────────────────
-_REGION              = os.environ.get("DATA_REGION", "")
-_TOKENS_TABLE        = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
+_REGION               = os.environ.get("DATA_REGION", "")
+_TOKENS_TABLE         = os.environ.get("GH_TOKENS_TABLE", "google_home_tokens")
 # Service account JSON key secret — enables immediate GH app sync via Home Graph API
 _GH_SA_KEY_SECRET_ARN = os.environ.get("GOOGLE_SA_KEY_SECRET_ARN", "")
-_GH_SECRET_REGION    = os.environ.get("GOOGLE_SECRET_REGION", "")
-_HTTP_TIMEOUT        = int(os.environ.get("HTTP_TIMEOUT", "10"))
+_GH_SECRET_REGION     = os.environ.get("GOOGLE_SECRET_REGION", "")
+_HTTP_TIMEOUT         = int(os.environ.get("HTTP_TIMEOUT", "10"))
+_CREATE_UPDATE_FN     = os.environ.get("CREATE_UPDATE_FN", "")
 
 _REQUIRED_VARS = {"DATA_REGION": _REGION}
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
@@ -73,9 +74,10 @@ if not _GH_SA_KEY_SECRET_ARN:
     )
 
 # ── Module-level caches ────────────────────────────────────────────────────────
-_dynamodb = None
-_sm_cache = None
+_dynamodb       = None
+_sm_cache       = None
 _sa_creds_cache: dict | None = None
+_lambda_client  = None
 
 
 def _ddb():
@@ -292,6 +294,40 @@ def _delete_agent_user(user_id: str) -> None:
         _audit("GH_DELETE_AGENT_USER_UNEXPECTED_ERROR", userId=user_id, error=str(exc))
 
 
+def _notify_google_enabled(user_id: str, site_id: str, is_enabled: bool) -> None:
+    """
+    Async fire-and-forget: tell create_and_update_data_function to set
+    isGoogleEnabled on the site record in the user device details table.
+    Non-fatal — failure is logged; unlink is already complete.
+    """
+    if not _CREATE_UPDATE_FN or not site_id:
+        return
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_REGION)
+    payload = json.dumps({
+        "_source":         "google_home_internal",
+        "userId":          user_id,
+        "siteId":          site_id,
+        "isGoogleEnabled": is_enabled,
+    }).encode()
+    try:
+        _lambda_client.invoke(
+            FunctionName=_CREATE_UPDATE_FN,
+            InvocationType="Event",   # async — does not block response
+            Payload=payload,
+        )
+        logger.info(
+            "GOOGLE_ENABLED_NOTIFY_SENT fn=%s userId=%s siteId=%s isGoogleEnabled=%s",
+            _CREATE_UPDATE_FN, user_id, site_id, is_enabled,
+        )
+    except Exception as exc:
+        logger.warning(
+            "GOOGLE_ENABLED_NOTIFY_FAILED fn=%s userId=%s siteId=%s error=%s",
+            _CREATE_UPDATE_FN, user_id, site_id, exc,
+        )
+
+
 def _decode_jwt_sub(token: str) -> str:
     logger.debug("JWT_DECODE_START token_len=%d", len(token))
     parts = token.split(".")
@@ -369,7 +405,21 @@ def lambda_handler(event, context):  # noqa: ANN001
                request_id=request_id)
         return _resp(401, {"error": "Unauthorized"})
 
-    # ── 2. Fetch token record ──────────────────────────────────────────────────
+    # ── 2. Parse optional request body for siteId ─────────────────────────────
+    body_raw = event.get("body") or "{}"
+    try:
+        site_id = str(json.loads(body_raw).get("siteId", "")).strip()
+    except Exception:
+        site_id = ""
+
+    if not site_id:
+        logger.warning(
+            "GH_UNLINK_SITE_ID_MISSING userId=%s — isGoogleEnabled not updated; "
+            "Flutter app must send siteId in the unlink request body",
+            user_id,
+        )
+
+    # ── 3. Fetch token record ──────────────────────────────────────────────────
     logger.debug(
         "TOKEN_LOOKUP_START table=%s userId=%s request_id=%s",
         _TOKENS_TABLE, user_id, request_id,
@@ -448,6 +498,7 @@ def lambda_handler(event, context):  # noqa: ANN001
         )
         _audit("GH_UNLINK_COMPLETE", userId=user_id, agent_id=agent_id,
                outcome="success", request_id=request_id)
+        _notify_google_enabled(user_id, site_id, False)
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code", "Unknown")
         logger.error(
