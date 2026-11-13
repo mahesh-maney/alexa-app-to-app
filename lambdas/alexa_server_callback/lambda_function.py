@@ -78,7 +78,14 @@ def lambda_handler(event, context):  # noqa: ANN001
             "[AUDIT] LINKING_DENIED error=%s description=%s state=%s request_id=%s",
             error, description, state or "none", request_id,
         )
-        return _html_response(_error_page(error, description))
+        # 302 redirect directly to the app custom URL scheme — no HTML page shown.
+        # This mirrors Android behavior where the OS returns control to the app
+        # without any intermediate browser page.
+        error_deep_link = (
+            f"{_APP_SCHEME}://alexa/callback"
+            f"?error={urllib.parse.quote(error, safe='')}"
+        )
+        return _redirect(error_deep_link)
 
     # ── Missing params ────────────────────────────────────────────────────────
     if not code or not state:
@@ -109,6 +116,14 @@ def lambda_handler(event, context):  # noqa: ANN001
                 state, request_id)
 
     return _html_response(_success_page(deep_link))
+
+
+def _redirect(location: str) -> dict:
+    return {
+        "statusCode": 302,
+        "headers": {"Location": location},
+        "body": "",
+    }
 
 
 def _html_response(html: str, status: int = 200) -> dict:

@@ -325,6 +325,22 @@ def lambda_handler(event, context):  # noqa: ANN001
     linked_at = int((token_record or {}).get("linkedAt", 0)) or ""
     scope     = (token_record or {}).get("scope", "")
 
+    # Stale-data guard: a token written before this session started cannot have
+    # come from this session's OAuth exchange — it is from a prior link.
+    # Using strict < so a same-second token (extremely unlikely) is treated as
+    # linked rather than stale.
+    if linked and linked_at and linked_at < session_created:
+        logger.warning(
+            "STALE_TOKEN_DETECTED userId=%s linked_at=%s session_created=%d "
+            "delta_seconds=%d — treating as not linked request_id=%s",
+            user_id, linked_at, session_created, session_created - linked_at, request_id,
+        )
+        _audit("GH_COMPLETE_STALE_TOKEN", userId=user_id,
+               linked_at=linked_at, session_created=session_created, request_id=request_id)
+        linked    = False
+        agent_id  = ""
+        linked_at = ""
+
     if linked:
         if site_id:
             # Persist siteId into the linked marker so _handle_disconnect can read it back

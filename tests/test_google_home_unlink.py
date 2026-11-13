@@ -18,7 +18,7 @@ _HERE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MOD_NAME = "gh_unlink_fn"
 _SPEC     = importlib.util.spec_from_file_location(
     _MOD_NAME,
-    os.path.join(_HERE, "lambdas", "google_home_unlink", "lambda_function.py"),
+    os.path.join(_HERE, "lambdas", "google_home_app_unlink", "lambda_function.py"),
 )
 
 
@@ -113,9 +113,20 @@ class TestAlreadyUnlinked:
         r, _, mock_ddb, _ = _run_unlink(None)
         mock_ddb.return_value.Table.return_value.delete_item.assert_not_called()
 
-    def test_delete_agent_user_not_called_when_no_record(self):
+    def test_delete_agent_user_retried_when_no_record(self):
         r, _, _, mock_delete_agent = _run_unlink(None)
-        mock_delete_agent.assert_not_called()
+        mock_delete_agent.assert_called_once_with(USER_ID)
+
+
+class TestServiceAccountRegion:
+    def test_secret_arn_region_overrides_oauth_secret_region(self):
+        m = _load()
+        m._GH_SA_KEY_SECRET_ARN = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:homegraph-test"
+        m._GH_SECRET_REGION = "ap-south-1"
+        m._sm_cache = None
+        with patch.object(m.boto3, "client") as client:
+            m._sm()
+        client.assert_called_once_with("secretsmanager", region_name="eu-west-1")
 
 
 # ── Successful unlink ─────────────────────────────────────────────────────────
