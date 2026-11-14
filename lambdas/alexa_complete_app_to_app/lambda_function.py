@@ -94,6 +94,7 @@ _REQUIRED_VARS = {
     "LWA_SECRET_ARN":      _LWA_SECRET_ARN,
     "LWA_SECRET_REGION":   _LWA_SECRET_REGION,
     "LWA_TOKEN_URL":       _LWA_TOKEN_URL,
+    "KMS_KEY_ARN":         _KMS_KEY_ARN,
 }
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
 if _missing_vars:
@@ -104,9 +105,6 @@ if _missing_vars:
 if not _COGNITO_USER_POOL_ID:
     logger.warning("SECURITY_WARNING COGNITO_USER_POOL_ID not set — "
                    "JWT signature verification DISABLED (set for production)")
-if not _KMS_KEY_ARN:
-    logger.warning("SECURITY_WARNING KMS_KEY_ARN not set — "
-                   "tokens stored in plaintext (set for production)")
 if not _LWA_REVOKE_URL:
     logger.warning("SECURITY_WARNING LWA_REVOKE_URL not set — "
                    "token revocation on unlink will be unavailable")
