@@ -43,7 +43,8 @@ REQUIRED_KEYS = [
     # API_GATEWAY_ID intentionally omitted — empty string = auto-create a new API
     "API_STAGE", "API_BASE_URL",
     "COGNITO_USER_POOL_ID", "COGNITO_REGION", "COGNITO_CLIENT_ID",
-    "ALEXA_SESSIONS_TABLE", "ALEXA_TOKENS_TABLE",
+    "COGNITO_HOSTED_UI_DOMAIN",
+    "ALEXA_SESSIONS_TABLE", "ALEXA_TOKENS_TABLE", "ALEXA_PKCE_TABLE",
     "USER_DEVICE_MAPPING_TABLE", "USER_DEVICE_DETAILS_TABLE",
     "DEVICE_STATE_TABLE", "SCENE_TABLE", "SCENE_GSI_NAME",
     "METADATA_BUCKET", "ENDPOINT_KEY_SECRET_ARN", "ENDPOINT_KEY_REGION",
@@ -55,6 +56,9 @@ REQUIRED_KEYS = [
     "LWA_TOKEN_URL", "LWA_REVOKE_URL", "SKILL_ENABLEMENT_URL",
     "ALEXA_GATEWAY_URL", "IOT_DATA_ENDPOINT",
     "DEVICE_TABLE_SECRET_ARN", "DEVICE_TABLE_SECRET_REGION",
+    # Stage 1 SMAPI PKCE flow
+    "SMAPI_LINKING_ENABLED", "COGNITO_ALEXA_CLIENT_ID",
+    "ALEXA_COGNITO_CALLBACK_URI", "PKCE_STATE_SECRET_ARN", "PKCE_STATE_SECRET_REGION",
 ]
 
 # ─── Lambda definitions ───────────────────────────────────────────────────────
@@ -71,6 +75,7 @@ ALEXA_LAMBDAS = [
     ("alexa_state_reporter",       "lambdas/alexa_state_reporter",       30, 256,  "main"),
     ("alexa_proactive_discovery",  "lambdas/alexa_proactive_discovery",  30, 256,  "main"),
     ("alexa_fulfillment",          "lambdas/alexa_fulfillment",          30, 256,  "ireland"),
+    ("alexa_cognito_callback",     "lambdas/alexa_cognito_callback",     15, 256,  "main"),
 ]
 
 
@@ -101,7 +106,15 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "USER_DEVICE_MAPPING_TABLE": cfg(c, "USER_DEVICE_MAPPING_TABLE"),
                 "CREATE_UPDATE_FN": cfg(c, "CREATE_UPDATE_FN"),
                 "LWA_TOKEN_URL": cfg(c, "LWA_TOKEN_URL"),
-                "LWA_REVOKE_URL": cfg(c, "LWA_REVOKE_URL")}
+                "LWA_REVOKE_URL": cfg(c, "LWA_REVOKE_URL"),
+                # Stage 1 SMAPI PKCE flow
+                "SMAPI_LINKING_ENABLED":    cfg(c, "SMAPI_LINKING_ENABLED"),
+                "PKCE_TABLE":               cfg(c, "ALEXA_PKCE_TABLE"),
+                "COGNITO_ALEXA_CLIENT_ID":  cfg(c, "COGNITO_ALEXA_CLIENT_ID"),
+                "COGNITO_HOSTED_UI_DOMAIN": cfg(c, "COGNITO_HOSTED_UI_DOMAIN"),
+                "COGNITO_CALLBACK_URI":     cfg(c, "ALEXA_COGNITO_CALLBACK_URI"),
+                "PKCE_STATE_SECRET_ARN":    cfg(c, "PKCE_STATE_SECRET_ARN"),
+                "PKCE_STATE_SECRET_REGION": cfg(c, "PKCE_STATE_SECRET_REGION")}
     if fn_name == "alexa_server_callback":
         return {**base,
                 "COGNITO_USER_POOL_ID": cfg(c, "COGNITO_USER_POOL_ID"),
@@ -176,6 +189,24 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "ALEXA_GATEWAY_URL": cfg(c, "ALEXA_GATEWAY_URL"),
                 "IOT_DATA_ENDPOINT": cfg(c, "IOT_DATA_ENDPOINT"),
                 "CREATE_UPDATE_FN":  cfg(c, "CREATE_UPDATE_FN")}
+    if fn_name == "alexa_cognito_callback":
+        return {**base,
+                "COGNITO_USER_POOL_ID":    cfg(c, "COGNITO_USER_POOL_ID"),
+                "COGNITO_REGION":          cfg(c, "COGNITO_REGION"),
+                "PKCE_TABLE":              cfg(c, "ALEXA_PKCE_TABLE"),
+                "LWA_TOKENS_TABLE":        cfg(c, "ALEXA_TOKENS_TABLE"),
+                "KMS_KEY_ARN":             kms_key_arn,
+                "COGNITO_HOSTED_UI_DOMAIN": cfg(c, "COGNITO_HOSTED_UI_DOMAIN"),
+                "COGNITO_ALEXA_CLIENT_ID": cfg(c, "COGNITO_ALEXA_CLIENT_ID"),
+                "COGNITO_CLIENT_SECRET":   cfg(c, "COGNITO_CLIENT_SECRET"),
+                "COGNITO_CALLBACK_URI":    cfg(c, "ALEXA_COGNITO_CALLBACK_URI"),
+                "PKCE_STATE_SECRET_ARN":   cfg(c, "PKCE_STATE_SECRET_ARN"),
+                "PKCE_STATE_SECRET_REGION": cfg(c, "PKCE_STATE_SECRET_REGION"),
+                "ALEXA_SKILL_ID":          cfg(c, "ALEXA_SKILL_ID"),
+                "ALEXA_SKILL_STAGE":       cfg(c, "ALEXA_SKILL_STAGE"),
+                "SKILL_ENABLEMENT_URL":    cfg(c, "SKILL_ENABLEMENT_URL"),
+                "CREATE_UPDATE_FN":        cfg(c, "CREATE_UPDATE_FN"),
+                "APP_SCHEME":              cfg(c, "APP_DEEP_LINK_SCHEME")}
     raise ValueError(f"Unknown Alexa Lambda: {fn_name}")
 
 
@@ -221,8 +252,9 @@ def step3_ddb(session, c: dict):
     region = cfg(c, "AWS_REGION")
     ddb = make_client(session, "dynamodb", region)
     tables = [
-        (cfg(c, "ALEXA_SESSIONS_TABLE"), "state",  "ttl"),
-        (cfg(c, "ALEXA_TOKENS_TABLE"),   "userId", None),
+        (cfg(c, "ALEXA_SESSIONS_TABLE"), "state",              "ttl"),
+        (cfg(c, "ALEXA_TOKENS_TABLE"),   "userId",             None),
+        (cfg(c, "ALEXA_PKCE_TABLE"),     "pkceTransactionId",  "expiresAt"),
     ]
     for name, pk, ttl in tables:
         ensure_table(ddb, name, pk, ttl_attr=ttl)
@@ -319,6 +351,14 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
     cw_irl      = st_cw(account_id, irl_region)
     xr          = st_xray()
 
+    # Some environments encrypt the LWA tokens table with a separate KMS key
+    # (e.g. alias/digilux/honeywell/app) rather than the main Alexa token key.
+    # When ALEXA_TOKENS_KMS_KEY_ARN is set and differs from kms_key_arn, every
+    # role that reads from ALEXA_TOKENS_TABLE also needs kms:Decrypt on that key.
+    _toks_kms_arn = cfg(c, "ALEXA_TOKENS_KMS_KEY_ARN")
+    tokens_kms = (st_kms(_toks_kms_arn, ["kms:Decrypt"]),) \
+        if _toks_kms_arn and _toks_kms_arn != kms_key_arn else ()
+
     roles = [
         (f"{role_pre}-alexa-start-role", make_policy(
             st_ddb(["dynamodb:PutItem", "dynamodb:GetItem"], account_id, region, sessions),
@@ -328,39 +368,44 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
             st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem"], account_id, region, sessions),
             st_ddb(["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"],
                    account_id, region, tokens),
-            st_sm(lwa_arn), st_kms(kms_key_arn), cw, xr)),
+            st_ddb(["dynamodb:GetItem"], account_id, region, udm),
+            st_ddb(["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:DeleteItem",
+                    "dynamodb:TransactWriteItems"],
+                   account_id, region, cfg(c, "ALEXA_PKCE_TABLE")),
+            st_sm(lwa_arn, cfg(c, "PKCE_STATE_SECRET_ARN")),
+            st_kms(kms_key_arn), *tokens_kms, cw, xr)),
 
         (f"{role_pre}-alexa-callback-role", make_policy(cw, xr)),
 
         (f"{role_pre}-alexa-unlink-role", make_policy(
             st_ddb(["dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:UpdateItem"],
                    account_id, region, tokens),
-            st_sm(lwa_arn), st_kms(kms_key_arn, ["kms:Decrypt"]), cw, xr)),
+            st_sm(lwa_arn), st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms, cw, xr)),
 
         (f"{role_pre}-alexa-status-role", make_policy(
             st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
                    account_id, region, tokens),
-            st_sm(lwa_arn), st_kms(kms_key_arn, ["kms:Decrypt"]), cw, xr)),
+            st_sm(lwa_arn), st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms, cw, xr)),
 
         (f"{role_pre}-alexa-skill-evt-role", make_policy(
             st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
                    account_id, region, tokens),
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"],
                    account_id, region, udm, idx=True),
-            cw, xr)),
+            *tokens_kms, cw, xr)),
 
         (f"{role_pre}-alexa-state-reporter-role", make_policy(
             st_ddb(["dynamodb:GetItem"], account_id, region, tokens),
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, udd, idx=True),
             st_s3(bucket), st_sm(ep_arn, lwa_arn),
-            st_stream(account_id, region, ds), cw, xr)),
+            *tokens_kms, st_stream(account_id, region, ds), cw, xr)),
 
         (f"{role_pre}-alexa-proactive-role", make_policy(
             st_ddb(["dynamodb:GetItem"], account_id, region, tokens),
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, udd, idx=True),
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, scene, idx=True),
             st_s3(bucket), st_sm(ep_arn, lwa_arn),
-            st_stream(account_id, region, udd), cw, xr)),
+            *tokens_kms, st_stream(account_id, region, udd), cw, xr)),
 
         (f"{role_pre}-alexa-fulfillment-role", make_policy(
             st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
@@ -369,9 +414,19 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, ds,  idx=True),
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, scene, idx=True),
             st_s3(bucket), st_sm(lwa_arn, ep_arn, dt_arn),
-            st_kms(kms_key_arn, ["kms:Decrypt"]),
+            st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms,
             st_iot(account_id, region),
             cw_irl, xr)),   # CW Logs in Ireland — Lambda writes logs where it runs
+
+        (f"{role_pre}-alexa-cognito-cb-role", make_policy(
+            st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+                   account_id, region, cfg(c, "ALEXA_PKCE_TABLE")),
+            st_ddb(["dynamodb:GetItem"], account_id, region, tokens),
+            st_sm(cfg(c, "PKCE_STATE_SECRET_ARN")),
+            st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms,
+            {"Effect": "Allow", "Action": "lambda:InvokeFunction",
+             "Resource": f"arn:aws:lambda:{region}:{account_id}:function:{cfg(c,'CREATE_UPDATE_FN')}"},
+            cw, xr)),
     ]
 
     log_info("NOTE: alexa-fulfillment-role CW Logs permission scoped to ALEXA_FULFILLMENT_REGION"
@@ -390,7 +445,7 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
 
 # ─── Step 7 — Package Lambdas ────────────────────────────────────────────────
 
-def step7_package(c: dict) -> dict:
+def step7_package(c: dict, deploy_only: set | None = None) -> dict:
     step_header(7, "PACKAGE LAMBDAS")
     env_label  = cfg(c, "ENV_LABEL")
     irl_region = cfg(c, "ALEXA_FULFILLMENT_REGION")
@@ -399,10 +454,15 @@ def step7_package(c: dict) -> dict:
         shutil.rmtree(build_root)
     os.makedirs(build_root)
     log_info(f"Build dir: {build_root}")
+    if deploy_only:
+        log_info(f"Lambda filter active — packaging only: {sorted(deploy_only)}")
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     zips = {}
     for fn_name, src_rel, _, _, region_key in ALEXA_LAMBDAS:
+        if deploy_only and fn_name not in deploy_only:
+            log_skip(f"  [SKIP] {fn_name} (not in --lambdas filter)")
+            continue
         src = os.path.join(repo_root, src_rel)
         if not os.path.exists(src):
             log_error(f"Source directory not found: {src}")
@@ -411,14 +471,16 @@ def step7_package(c: dict) -> dict:
             log_info(f"  [IRELAND LAMBDA] {fn_name} — will deploy to {irl_region}")
         zips[fn_name] = package_lambda(src, fn_name, build_root)
 
-    log_ok(f"Packaging complete  {len(zips)} zips built")
+    log_ok(f"Packaging complete  {len(zips)} zips built"
+           + (f"  (filtered from {len(ALEXA_LAMBDAS)})" if deploy_only else ""))
     return zips
 
 
 # ─── Step 8 — Deploy Lambdas ─────────────────────────────────────────────────
 
 def step8_lambdas(session, c: dict, role_arns: dict, zips: dict,
-                  kms_key_arn: str, account_id: str) -> dict:
+                  kms_key_arn: str, account_id: str,
+                  deploy_only: set | None = None) -> dict:
     step_header(8, "LAMBDA DEPLOY")
     main_region = cfg(c, "AWS_REGION")
     irl_region  = cfg(c, "ALEXA_FULFILLMENT_REGION")
@@ -434,11 +496,15 @@ def step8_lambdas(session, c: dict, role_arns: dict, zips: dict,
         "alexa_state_reporter":      f"{cfg(c,'ROLE_PREFIX')}-alexa-state-reporter-role",
         "alexa_proactive_discovery": f"{cfg(c,'ROLE_PREFIX')}-alexa-proactive-role",
         "alexa_fulfillment":         f"{cfg(c,'ROLE_PREFIX')}-alexa-fulfillment-role",
+        "alexa_cognito_callback":    f"{cfg(c,'ROLE_PREFIX')}-alexa-cognito-cb-role",
     }
 
     main_count = 0
     for fn_name, _, timeout, memory, region_key in ALEXA_LAMBDAS:
         if region_key == "ireland":
+            continue
+        if deploy_only and fn_name not in deploy_only:
+            log_skip(f"  [SKIP] {fn_name} (not in --lambdas filter)")
             continue
         env_vars = _lambda_env(fn_name, c, kms_key_arn)
         arn = deploy_lambda(session, fn_name, zips[fn_name],
@@ -448,16 +514,23 @@ def step8_lambdas(session, c: dict, role_arns: dict, zips: dict,
         main_count += 1
 
     log_info(f"\n── Ireland Lambda ──────────────────────────────────────────────────────")
-    log_info(f"Deploying alexa_fulfillment → {irl_region}  timeout=30s  memory=256MB")
-    log_info(f"NOTE: DATA_REGION={main_region} — DDB tables live in main region, not Ireland")
-    env_vars = _lambda_env("alexa_fulfillment", c, kms_key_arn)
-    arn = deploy_lambda(session, "alexa_fulfillment", zips["alexa_fulfillment"],
-                        role_arns[role_map["alexa_fulfillment"]], 30, 256, env_vars, irl_region)
-    fn_arns["alexa_fulfillment"] = arn
-    set_log_retention(session, "alexa_fulfillment", irl_region)
+    if deploy_only and "alexa_fulfillment" not in deploy_only:
+        log_skip(f"  [SKIP] alexa_fulfillment (not in --lambdas filter)")
+    else:
+        log_info(f"Deploying alexa_fulfillment → {irl_region}  timeout=30s  memory=256MB")
+        log_info(f"NOTE: DATA_REGION={main_region} — DDB tables live in main region, not Ireland")
+        env_vars = _lambda_env("alexa_fulfillment", c, kms_key_arn)
+        arn = deploy_lambda(session, "alexa_fulfillment", zips["alexa_fulfillment"],
+                            role_arns[role_map["alexa_fulfillment"]], 30, 256, env_vars, irl_region)
+        fn_arns["alexa_fulfillment"] = arn
+        set_log_retention(session, "alexa_fulfillment", irl_region)
 
-    log_ok(f"Lambdas deployed: {len(fn_arns)}/{len(ALEXA_LAMBDAS)}  "
-           f"({main_count} × {main_region}, 1 × {irl_region})")
+    total_all = len(ALEXA_LAMBDAS)
+    skipped   = total_all - len(fn_arns)
+    log_ok(f"Lambdas deployed: {len(fn_arns)}/{total_all}  "
+           f"({main_count} × {main_region}"
+           + (f", 1 × {irl_region}" if "alexa_fulfillment" in fn_arns else "")
+           + (f", {skipped} skipped" if skipped else "") + ")")
     log_warn("alexa_fulfillment is NOT wired to API GW — called directly by Alexa Smart Home backend")
     return fn_arns
 
@@ -472,9 +545,28 @@ def step9_routes(session, c: dict, apigw_info: dict, fn_arns: dict, account_id: 
     auth_id = apigw_info["authorizer_id"]
     root_id = apigw_info["root_id"]
 
+    _lam_client = make_client(session, "lambda", region)
+
+    def _resolve_arn(fn_name: str) -> str | None:
+        if fn_name in fn_arns:
+            return fn_arns[fn_name]
+        # Lambda was not deployed in this run (filtered via --lambdas); look up live ARN.
+        try:
+            return _lam_client.get_function(FunctionName=fn_name)["Configuration"]["FunctionArn"]
+        except _lam_client.exceptions.ResourceNotFoundException:
+            log_warn(f"Lambda '{fn_name}' not found in AWS — skipping route wiring")
+            return None
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot resolve ARN for '{fn_name}': not in this deploy and AWS lookup failed ({exc})"
+            ) from exc
+
     def wm(resource_id, method, fn_name, auth="COGNITO_USER_POOLS"):
+        arn = _resolve_arn(fn_name)
+        if arn is None:
+            return
         wire_method(session, apigw, api_id, resource_id, method,
-                    fn_arns[fn_name], region, account_id, fn_name,
+                    arn, region, account_id, fn_name,
                     auth_type=auth,
                     authorizer_id=auth_id if auth == "COGNITO_USER_POOLS" else None)
 
@@ -512,8 +604,14 @@ def step9_routes(session, c: dict, apigw_info: dict, fn_arns: dict, account_id: 
     wm(skill_evt_res, "POST",  "alexa_skill_server_events", auth="NONE")
     wire_cors(apigw, api_id, skill_evt_res)
 
+    log_info("Building /api/v1/alexa/cognito/callback tree")
+    cognito_res   = get_or_create_resource(apigw, api_id, alexa_res,   "cognito")
+    cog_cb_res    = get_or_create_resource(apigw, api_id, cognito_res, "callback")
+    wm(cog_cb_res, "GET", "alexa_cognito_callback", auth="NONE")
+    wire_cors(apigw, api_id, cog_cb_res)
+
     log_info("NOTE: alexa_fulfillment NOT wired to API GW — triggered directly by Alexa backend")
-    log_ok("Routes wired: 6 methods on 6 resources")
+    log_ok("Routes wired: 7 methods on 7 resources")
 
 
 # ─── Step 10 — Deploy Stage ──────────────────────────────────────────────────
@@ -595,6 +693,12 @@ def main():
     parser.add_argument("--config",  required=True, help="Path to env JSON config file")
     parser.add_argument("--dry-run", action="store_true", help="Validate + preflight only, no deploy")
     parser.add_argument("--profile", default=None, help="AWS CLI profile")
+    parser.add_argument(
+        "--lambdas", default=None,
+        help="Comma-separated Lambda names to deploy (default: all). "
+             "DDB tables, IAM roles, API routes and stage deploy always run. "
+             "Example: --lambdas alexa_complete_app_to_app",
+    )
     args = parser.parse_args()
 
     start_time = datetime.now()
@@ -605,6 +709,15 @@ def main():
 
     c = step1_config(args.config)
 
+    deploy_only = set(x.strip() for x in args.lambdas.split(",")) if args.lambdas else None
+    if deploy_only:
+        valid_names = {fn for fn, *_ in ALEXA_LAMBDAS}
+        unknown = deploy_only - valid_names
+        if unknown:
+            print(f"ERROR: Unknown Lambda name(s) in --lambdas: {unknown}")
+            print(f"Valid names: {sorted(valid_names)}")
+            sys.exit(1)
+
     session_kwargs = {"region_name": cfg(c, "AWS_REGION")}
     if args.profile:
         session_kwargs["profile_name"] = args.profile
@@ -612,6 +725,11 @@ def main():
 
     account_id = step2_preflight(session, c)
 
+    lambda_count_str = (
+        f"{len(deploy_only)} (filtered: {', '.join(sorted(deploy_only))})"
+        if deploy_only else
+        f"9 (8 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})"
+    )
     print(f"\n  {'━' * 60}")
     print(f"  DEPLOYMENT PLAN — deploy_alexa.py")
     print(f"  ENV_LABEL              : {cfg(c,'ENV_LABEL')}")
@@ -619,10 +737,10 @@ def main():
     print(f"  ALEXA_FULFILLMENT_REGION: {cfg(c,'ALEXA_FULFILLMENT_REGION')}  (alexa_fulfillment)")
     print(f"  API                    : {cfg(c,'API_GATEWAY_ID')}  →  {cfg(c,'API_BASE_URL')}")
     print(f"  Will create/update:")
-    print(f"    DDB tables    : 2 (alexa_sessions, alexa_tokens)")
+    print(f"    DDB tables    : 3 (alexa_sessions, alexa_tokens, alexa_pkce_sessions)")
     print(f"    KMS key       : 1 ({cfg(c,'KMS_KEY_ALIAS')})")
     print(f"    IAM roles     : 9")
-    print(f"    Lambda funcs  : 9 (8 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})")
+    print(f"    Lambda funcs  : {lambda_count_str}")
     print(f"    API GW routes : 6 methods on 6 resources + CORS")
     print(f"    Stage         : {cfg(c,'API_STAGE')}")
     print(f"  {'━' * 60}\n")
@@ -638,8 +756,8 @@ def main():
         kms_key_arn = step4_kms(session, c, account_id)
         apigw_info  = step5_apigw(session, c, account_id)
         role_arns   = step6_iam(session, c, account_id, kms_key_arn)
-        zips        = step7_package(c)
-        fn_arns     = step8_lambdas(session, c, role_arns, zips, kms_key_arn, account_id)
+        zips        = step7_package(c, deploy_only)
+        fn_arns     = step8_lambdas(session, c, role_arns, zips, kms_key_arn, account_id, deploy_only)
         step9_routes(session, c, apigw_info, fn_arns, account_id)
         step10_stage(session, c, apigw_info)
         step11_smoke(c)
@@ -650,10 +768,12 @@ def main():
         print(f"\n{'━' * 68}")
         log_ok(f"deploy_alexa.py completed  env={cfg(c,'ENV_LABEL')}")
         log_info(f"Duration: {elapsed // 60}m {elapsed % 60}s")
-        log_info(f"  DDB tables  : 2")
+        log_info(f"  DDB tables  : 3")
         log_info(f"  KMS key     : {cfg(c,'KMS_KEY_ALIAS')}")
         log_info(f"  IAM roles   : 9")
-        log_info(f"  Lambdas     : 9 (8 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})")
+        log_info(f"  Lambdas     : {len(fn_arns)} deployed"
+                 + (f" (filtered)" if deploy_only else
+                    f" (8 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})"))
         log_info(f"  API GW      : 6 routes wired, stage deployed")
         print(f"{'━' * 68}\n")
 

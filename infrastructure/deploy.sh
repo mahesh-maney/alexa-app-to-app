@@ -32,6 +32,7 @@ ALLOWED_REDIRECT_HOSTS="iot.digilux.co.in"
 # Resource names
 SESSION_TABLE="alexa_app_linking_sessions"
 LWA_TOKENS_TABLE="digilux_honeywell_alexa_lwa_tokens"
+PKCE_TABLE="alexa_pkce_sessions"
 USER_DEVICE_MAPPING_TABLE="digilux_honeywell_user_device_mapping"
 LAMBDA_START="alexa_app_to_app_link"
 LAMBDA_COMPLETE="alexa_complete_app_to_app"
@@ -103,6 +104,8 @@ else
 
   echo "    Created: $LWA_TOKENS_TABLE"
 fi
+
+# NOTE: alexa_pkce_sessions table is owned by deploy/deploy_alexa.py (do not create here)
 
 # KMS key for field-level encryption
 KMS_KEY_ARN=$(aws kms list-aliases --region "$REGION" \
