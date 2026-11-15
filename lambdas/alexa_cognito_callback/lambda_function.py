@@ -10,23 +10,31 @@ Flow:
         - must exist and be PENDING_COGNITO
         - must not be expired
   4.  Decrypt KMS-encrypted PKCE verifier
-  5.  Exchange Cognito auth code for Cognito tokens (PKCE token exchange)
-  6.  Decode Cognito access token → extract sub (= userId)
-  7.  Identity binding check: sub MUST equal PKCE transaction userId
-        Prevents wrong-account attack: an attacker cannot link a different
-        user's Digilux site by logging in with a different Cognito account.
-  8.  Retrieve LWA access token for the user (from alexa_lwa_tokens)
-  9.  Call SMAPI PUT /v1/users/~current/skills/{skillId}/enablement
-        Enables the skill for the user so it shows as linked in the Alexa app.
-        Non-blocking: warning only if unavailable or token expired.
-  10. Mark PKCE transaction COGNITO_VERIFIED in DDB
-  11. Fire CREATE_UPDATE_FN (async) → isAlexaEnabled=true for siteId
-  12. 302 redirect → {APP_SCHEME}://alexa/cognito/result?linked=true
+  5.  Retrieve LWA access token for the user (from alexa_lwa_tokens)
+  6.  Call Skill Enablement API (enable + account link):
+        POST /v1/users/~current/skills/{skillId}/enablement
+        Authorization: Bearer <LWA access token>
+        Body:
+          {
+            "stage": "<ALEXA_SKILL_STAGE>",
+            "accountLinkRequest": {
+              "type": "AUTH_CODE",
+              "authCode": "<Cognito auth code — unconsumed>",
+              "redirectUri": "<COGNITO_CALLBACK_URI>",
+              "authCodeVerifier": "<PKCE verifier>"
+            }
+          }
+        Alexa exchanges the Cognito auth code at the skill Access Token URL.
+        Blocking: failure → linked=false.
+  7.  Mark PKCE transaction COGNITO_VERIFIED in DDB
+  8.  Fire CREATE_UPDATE_FN (async) → isAlexaEnabled=true for siteId
+  9.  302 redirect → cognito result App Link?linked=true
 
-Error paths → 302 redirect → {APP_SCHEME}://alexa/cognito/result?linked=false&error={code}
+Error paths → 302 redirect → cognito result?linked=false&error={code}
 
 This endpoint has NO Cognito authorizer — it is called by Cognito Hosted UI
-redirecting a browser. Auth is via HMAC-signed state + identity binding (step 7).
+redirecting a browser. Auth is via HMAC-signed state bound to Stage 1 userId.
+The Cognito auth code is passed unconsumed to Alexa (single-use).
 """
 from __future__ import annotations
 
@@ -44,29 +52,15 @@ import urllib.request
 import boto3
 from botocore.exceptions import ClientError
 
-try:
-    from jose import jwt as jose_jwt
-    from jose import jwk as jose_jwk
-    from jose.exceptions import JWTError
-except ImportError as _imp_exc:
-    logger = logging.getLogger()
-    logger.error("JWT_VERIFY_UNAVAILABLE python-jose not installed")
-    raise RuntimeError("python-jose[cryptography] required for JWT verification") from _imp_exc
-
 logger = logging.getLogger()
 logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 # ── Environment variables ──────────────────────────────────────────────────────
-_REGION                 = os.environ.get("DATA_REGION",               "")
-_PKCE_TABLE             = os.environ.get("PKCE_TABLE",                "")
-_LWA_TOKENS_TABLE       = os.environ.get("LWA_TOKENS_TABLE",          "")
-_KMS_KEY_ARN            = os.environ.get("KMS_KEY_ARN",               "")
-_COGNITO_HOSTED_UI_DOMAIN = os.environ.get("COGNITO_HOSTED_UI_DOMAIN", "")
-_COGNITO_ALEXA_CLIENT_ID  = os.environ.get("COGNITO_ALEXA_CLIENT_ID",  "")
-_COGNITO_CLIENT_SECRET    = os.environ.get("COGNITO_CLIENT_SECRET",    "")
+_REGION                   = os.environ.get("DATA_REGION",               "")
+_PKCE_TABLE               = os.environ.get("PKCE_TABLE",                "")
+_LWA_TOKENS_TABLE         = os.environ.get("LWA_TOKENS_TABLE",          "")
+_KMS_KEY_ARN              = os.environ.get("KMS_KEY_ARN",               "")
 _COGNITO_CALLBACK_URI     = os.environ.get("COGNITO_CALLBACK_URI",     "")
-_COGNITO_USER_POOL_ID     = os.environ.get("COGNITO_USER_POOL_ID",     "")
-_COGNITO_REGION           = os.environ.get("COGNITO_REGION",           _REGION or "")
 _PKCE_STATE_SECRET_ARN    = os.environ.get("PKCE_STATE_SECRET_ARN",    "")
 _PKCE_STATE_SECRET_REGION = os.environ.get("PKCE_STATE_SECRET_REGION", "")
 _ALEXA_SKILL_ID           = os.environ.get("ALEXA_SKILL_ID",           "")
@@ -77,22 +71,16 @@ _CREATE_UPDATE_FN         = os.environ.get("CREATE_UPDATE_FN",         "")
 _APP_SCHEME               = os.environ.get("APP_SCHEME",               "")
 _HTTP_TIMEOUT             = int(os.environ.get("HTTP_TIMEOUT",         "10"))
 
-_COGNITO_ISSUER = (
-    f"https://cognito-idp.{_COGNITO_REGION}.amazonaws.com/{_COGNITO_USER_POOL_ID}"
-    if _COGNITO_USER_POOL_ID else ""
-)
-
 _REQUIRED_VARS = {
-    "DATA_REGION":            _REGION,
-    "PKCE_TABLE":             _PKCE_TABLE,
-    "LWA_TOKENS_TABLE":       _LWA_TOKENS_TABLE,
-    "KMS_KEY_ARN":            _KMS_KEY_ARN,
-    "COGNITO_HOSTED_UI_DOMAIN": _COGNITO_HOSTED_UI_DOMAIN,
-    "COGNITO_ALEXA_CLIENT_ID":  _COGNITO_ALEXA_CLIENT_ID,
+    "DATA_REGION":              _REGION,
+    "PKCE_TABLE":               _PKCE_TABLE,
+    "LWA_TOKENS_TABLE":         _LWA_TOKENS_TABLE,
+    "KMS_KEY_ARN":              _KMS_KEY_ARN,
     "COGNITO_CALLBACK_URI":     _COGNITO_CALLBACK_URI,
     "PKCE_STATE_SECRET_ARN":    _PKCE_STATE_SECRET_ARN,
     "PKCE_STATE_SECRET_REGION": _PKCE_STATE_SECRET_REGION,
     "APP_SCHEME":               _APP_SCHEME,
+    "ALEXA_SKILL_ID":           _ALEXA_SKILL_ID,
 }
 _missing_vars = [k for k, v in _REQUIRED_VARS.items() if not v]
 if _missing_vars:
@@ -103,7 +91,6 @@ _dynamodb               = None
 _kms_cache              = None
 _lambda_client          = None
 _pkce_signing_secret: str | None = None
-_jwks_cache: dict | None = None
 
 
 def _ddb():
@@ -139,16 +126,6 @@ def _get_pkce_signing_secret() -> str:
     return _pkce_signing_secret
 
 
-def _get_jwks() -> dict:
-    global _jwks_cache
-    if _jwks_cache is None:
-        url = f"{_COGNITO_ISSUER}/.well-known/jwks.json"
-        with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT) as r:
-            _jwks_cache = json.loads(r.read())
-        logger.info("JWKS_LOADED key_count=%d", len(_jwks_cache.get("keys", [])))
-    return _jwks_cache
-
-
 def _verify_state_and_get_txn_id(signed_state: str) -> str | None:
     """
     Verify HMAC-signed state and return the pkceTransactionId.
@@ -180,88 +157,74 @@ def _verify_state_and_get_txn_id(signed_state: str) -> str | None:
         return None
 
 
-def _exchange_cognito_code(code: str, verifier: str) -> dict:
-    """Exchange Cognito auth code for tokens using PKCE verifier."""
-    params = {
-        "grant_type":    "authorization_code",
-        "code":          code,
-        "redirect_uri":  _COGNITO_CALLBACK_URI,
-        "client_id":     _COGNITO_ALEXA_CLIENT_ID,
-        "code_verifier": verifier,
-    }
-    body = urllib.parse.urlencode(params).encode()
-    url  = f"https://{_COGNITO_HOSTED_UI_DOMAIN}/oauth2/token"
-    req  = urllib.request.Request(url, data=body,
-                                  method="POST",
-                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
-    if _COGNITO_CLIENT_SECRET:
-        creds = base64.b64encode(
-            f"{_COGNITO_ALEXA_CLIENT_ID}:{_COGNITO_CLIENT_SECRET}".encode()
-        ).decode()
-        req.add_header("Authorization", f"Basic {creds}")
-
-    with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-        return json.loads(r.read())
-
-
-def _decode_sub_from_access_token(access_token: str) -> str | None:
-    """Decode Cognito access token and return sub. Verifies RS256 signature via JWKS."""
-    try:
-        jwks = _get_jwks()
-        header = jose_jwt.get_unverified_header(access_token)
-        kid    = header.get("kid")
-        key    = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
-        if key is None:
-            logger.warning("JWT_KID_NOT_FOUND kid=%s", kid)
-            return None
-        public_key = jose_jwk.construct(key)
-        claims = jose_jwt.decode(
-            access_token,
-            public_key,
-            algorithms=["RS256"],
-            issuer=_COGNITO_ISSUER,
-            options={"verify_at_hash": False},
-        )
-        return claims.get("sub")
-    except JWTError as exc:
-        logger.warning("JWT_DECODE_FAILED reason=%s", exc)
-        return None
-
-
-def _check_smapi_enablement(lwa_access_token: str, request_id: str) -> bool:
+def _check_smapi_enablement(
+    lwa_access_token: str,
+    auth_code: str,
+    redirect_uri: str,
+    code_verifier: str,
+    stage: str,
+    request_id: str,
+) -> bool:
     """
-    Enable the skill for the user via SMAPI PUT, making it show as linked in
-    the Alexa app. Non-blocking: returns True if enabled, False on failure.
+    Enable the skill AND complete account linking via Skill Enablement API.
+
+    POST /v1/users/~current/skills/{skillId}/enablement
+    Alexa redeems auth_code at the skill's Access Token URL.
+
+    Returns True on HTTP 201 (or already-linked 409). False on failure.
     """
     if not _ALEXA_SKILL_ID or not _SKILL_ENABLEMENT_URL:
         logger.warning("SMAPI_CHECK_SKIPPED missing ALEXA_SKILL_ID or SKILL_ENABLEMENT_URL "
                        "request_id=%s", request_id)
         return False
+    if not auth_code or not redirect_uri:
+        logger.warning("SMAPI_CHECK_SKIPPED missing auth_code or redirect_uri request_id=%s",
+                       request_id)
+        return False
+
     url = f"{_SKILL_ENABLEMENT_URL}/{_ALEXA_SKILL_ID}/enablement"
+    body: dict = {
+        "stage": stage or "development",
+        "accountLinkRequest": {
+            "type": "AUTH_CODE",
+            "authCode": auth_code,
+            "redirectUri": redirect_uri,
+        },
+    }
+    # Required when the authorization request used PKCE (S256).
+    if code_verifier:
+        body["accountLinkRequest"]["authCodeVerifier"] = code_verifier
+
+    payload = json.dumps(body).encode()
     req = urllib.request.Request(
         url,
-        data=b"",
-        method="PUT",
+        data=payload,
+        method="POST",
         headers={
-            "Authorization":  f"Bearer {lwa_access_token}",
-            "Content-Type":   "application/json",
-            "Content-Length": "0",
+            "Authorization": f"Bearer {lwa_access_token}",
+            "Content-Type":  "application/json",
         },
     )
     try:
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-            logger.info("SMAPI_SKILL_ENABLED skill_id=%s status=%d request_id=%s",
-                        _ALEXA_SKILL_ID, r.status, request_id)
+            logger.info("SMAPI_SKILL_ENABLED_AND_LINKED skill_id=%s status=%d stage=%s "
+                        "request_id=%s", _ALEXA_SKILL_ID, r.status, stage, request_id)
             return True
     except urllib.error.HTTPError as exc:
-        # 204 is returned as a success by urlopen, but handle edge cases.
-        # 400/409 can mean already enabled — treat as success.
-        if exc.code in (400, 409):
-            logger.info("SMAPI_SKILL_ALREADY_ENABLED skill_id=%s status=%d request_id=%s",
+        err_body = ""
+        try:
+            err_body = exc.read().decode(errors="replace") if exc.fp else ""
+        except Exception:
+            pass
+        # 409 — skill already enabled/linked for this user.
+        if exc.code == 409:
+            logger.info("SMAPI_SKILL_ALREADY_LINKED skill_id=%s status=%d request_id=%s",
                         _ALEXA_SKILL_ID, exc.code, request_id)
             return True
-        logger.warning("SMAPI_ENABLEMENT_HTTP_ERROR status=%d skill_id=%s request_id=%s",
-                       exc.code, _ALEXA_SKILL_ID, request_id)
+        logger.warning(
+            "SMAPI_ENABLEMENT_HTTP_ERROR status=%d skill_id=%s body=%s request_id=%s",
+            exc.code, _ALEXA_SKILL_ID, err_body[:500], request_id,
+        )
         return False
     except Exception as exc:
         logger.warning("SMAPI_ENABLEMENT_ERROR error=%s request_id=%s", exc, request_id)
@@ -433,67 +396,43 @@ def lambda_handler(event, context):  # noqa: ANN001
                      txn_id[:8], exc, request_id)
         return _deep_link(False, "server_error")
 
-    # ── 5. Exchange Cognito auth code for tokens ───────────────────────────────
-    try:
-        tokens = _exchange_cognito_code(code, pkce_verifier)
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode() if exc.fp else ""
-        logger.error("COGNITO_EXCHANGE_HTTP_ERROR status=%d body=%s request_id=%s",
-                     exc.code, body, request_id)
-        return _deep_link(False, "cognito_exchange_failed")
-    except Exception as exc:
-        logger.error("COGNITO_EXCHANGE_FAILED error=%s request_id=%s", exc, request_id)
-        return _deep_link(False, "cognito_exchange_failed")
-
-    access_token = tokens.get("access_token", "")
-    if not access_token:
-        logger.error("COGNITO_NO_ACCESS_TOKEN request_id=%s", request_id)
-        return _deep_link(False, "cognito_exchange_failed")
-
-    logger.info("COGNITO_EXCHANGE_OK request_id=%s", request_id)
-
-    # ── 6. Decode Cognito access token → sub ──────────────────────────────────
-    cognito_sub = _decode_sub_from_access_token(access_token)
-    if not cognito_sub:
-        logger.error("COGNITO_SUB_MISSING request_id=%s", request_id)
-        return _deep_link(False, "identity_verification_failed")
-
-    # ── 7. Identity binding check ─────────────────────────────────────────────
-    # The Cognito sub MUST match the userId from the PKCE transaction.
-    # This proves the user who authorized the LWA app-to-app linking is the
-    # SAME user who just logged in with Cognito — prevents cross-account linking.
-    if cognito_sub != user_id:
-        logger.error(
-            "[SECURITY] IDENTITY_BINDING_FAILED cognito_sub_prefix=%s "
-            "txn_userId_prefix=%s txnId_prefix=%s request_id=%s",
-            cognito_sub[:8], user_id[:8], txn_id[:8], request_id,
-        )
-        return _deep_link(False, "identity_mismatch")
-
-    logger.info("[AUDIT] IDENTITY_BINDING_OK userId=%s txnId_prefix=%s request_id=%s",
+    # Identity is bound via Stage 1 Cognito JWT + HMAC-signed state → userId.
+    # Do NOT exchange the Cognito auth code here — Alexa must redeem it via
+    # Skill Enablement (auth codes are single-use).
+    logger.info("[AUDIT] STAGE1_IDENTITY_BOUND userId=%s txnId_prefix=%s request_id=%s",
                 user_id, txn_id[:8], request_id)
 
-    # ── 8. Retrieve LWA token for SMAPI check ────────────────────────────────
-    smapi_verified = False
+    # ── 5. Retrieve LWA access token (required for Skill Enablement) ───────────
     try:
         lwa_resp = _ddb().Table(_LWA_TOKENS_TABLE).get_item(Key={"userId": user_id})
         lwa_item = lwa_resp.get("Item", {})
         lwa_expires_at = int(lwa_item.get("expiresAt", 0))
-        if lwa_item and lwa_expires_at > now:
-            lwa_access_token = _decrypt_field(lwa_item["accessToken"])
-            # ── 9. SMAPI skill enablement (PUT) ──────────────────────────────
-            smapi_verified = _check_smapi_enablement(lwa_access_token, request_id)
-            if not smapi_verified:
-                logger.warning("SMAPI_ENABLE_FAILED — proceeding (identity binding already confirmed) "
-                               "userId=%s request_id=%s", user_id, request_id)
-        else:
-            logger.warning("LWA_TOKEN_EXPIRED_OR_MISSING userId=%s — skipping SMAPI check "
-                           "request_id=%s", user_id, request_id)
+        if not lwa_item or lwa_expires_at <= now:
+            logger.warning("LWA_TOKEN_EXPIRED_OR_MISSING userId=%s request_id=%s",
+                           user_id, request_id)
+            return _deep_link(False, "lwa_token_missing")
+        lwa_access_token = _decrypt_field(lwa_item["accessToken"])
     except Exception as exc:
-        logger.warning("SMAPI_CHECK_ERROR error=%s userId=%s request_id=%s",
-                       exc, user_id, request_id)
+        logger.error("LWA_TOKEN_LOOKUP_ERROR error=%s userId=%s request_id=%s",
+                     exc, user_id, request_id)
+        return _deep_link(False, "lwa_token_missing")
 
-    # ── 10. Mark PKCE transaction COGNITO_VERIFIED + release per-user lock ──────
+    # ── 6. Skill Enablement POST (enable + account link) — blocking ────────────
+    # Pass the unconsumed Cognito auth code so Alexa can exchange it at the
+    # skill Access Token URL (Cognito /oauth2/token when configured that way).
+    smapi_verified = _check_smapi_enablement(
+        lwa_access_token=lwa_access_token,
+        auth_code=code,
+        redirect_uri=_COGNITO_CALLBACK_URI,
+        code_verifier=pkce_verifier,
+        stage=_ALEXA_SKILL_STAGE,
+        request_id=request_id,
+    )
+    if not smapi_verified:
+        logger.error("SMAPI_ENABLE_FAILED userId=%s request_id=%s", user_id, request_id)
+        return _deep_link(False, "skill_enablement_failed")
+
+    # ── 7. Mark PKCE transaction COGNITO_VERIFIED + release per-user lock ──────
     lock_key = f"LOCK#{user_id}"
     try:
         table.update_item(
@@ -527,12 +466,12 @@ def lambda_handler(event, context):  # noqa: ANN001
         logger.warning("PKCE_LOCK_RELEASE_FAILED userId=%s error=%s request_id=%s",
                        user_id, exc, request_id)
 
-    # ── 11. Fire CREATE_UPDATE_FN → isAlexaEnabled=true ──────────────────────
+    # ── 8. Fire CREATE_UPDATE_FN → isAlexaEnabled=true ───────────────────────
     _notify_alexa_enabled(user_id, site_id, request_id)
 
     logger.info("[AUDIT] ALEXA_LINKED userId=%s siteId=%s smapi_verified=%s "
                 "txnId_prefix=%s request_id=%s",
                 user_id, site_id, smapi_verified, txn_id[:8], request_id)
 
-    # ── 12. Redirect to Flutter ───────────────────────────────────────────────
+    # ── 9. Redirect to Flutter ────────────────────────────────────────────────
     return _deep_link(True)
