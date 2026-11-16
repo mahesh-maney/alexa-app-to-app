@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Digilux — Alexa App-to-App Account Linking",
-    "description": "API collection for the Alexa App-to-App Account Linking feature.\n\nFlow:\n  1. POST   /api/v1/alexa/startAppToApp      → get state + codeChallenge\n  2. (User opens Alexa app, approves consent)\n  3. POST   /api/v1/alexa/completeAppToApp   → exchange code, enable skill\n  4. GET    /api/v1/alexa/status             → check if user is linked or not\n  5. DELETE /api/v1/alexa/unlink             → revoke + unlink (when needed)\n\nVariables required:\n  - base_url        : API Gateway base URL\n  - cognito_token   : Cognito ID token from app login\n  - alexa_code      : Authorization code extracted from deep link callback (step 3 only)\n  - alexa_state     : State value saved from startAppToApp response (step 3 only)",
+    "description": "API collection for the Alexa App-to-App Account Linking feature.\n\nFlow:\n  1. POST   /api/v1/alexa/startAppToApp      → get state + codeChallenge\n  2. (User opens Alexa app, approves consent)\n  3. POST   /api/v1/alexa/completeAppToApp   → exchange code, enable skill\n  4. GET    /api/v1/alexa/status             → check if user is linked or not\n  5. DELETE /api/v1/alexa/unlink             → revoke + unlink (when needed)\n\nVariables required:\n  - base_url        : API Gateway base URL\n                      Digilux QA:     https://iot.digilux.co.in/smarthome\n                      Honeywell QA:   https://api.nucleusqa.honeywell.com/api\n                      Honeywell PROD: https://api.nucleus.honeywell.com/api\n  - cognito_token   : Cognito ID token from app login\n  - alexa_code      : Authorization code extracted from deep link callback (step 3 only)\n  - alexa_state     : State value saved from startAppToApp response (step 3 only)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -9,7 +9,7 @@
       "key": "base_url",
       "value": "https://iot.digilux.co.in/smarthome",
       "type": "string",
-      "description": "API Gateway base URL"
+      "description": "API Gateway base URL. Digilux QA: https://iot.digilux.co.in/smarthome | Honeywell QA: https://api.nucleusqa.honeywell.com/api | Honeywell PROD: https://api.nucleus.honeywell.com/api"
     },
     {
       "key": "cognito_token",

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import logging
 import os
 import urllib.error
@@ -600,14 +601,56 @@ def lambda_handler(event, context):  # noqa: ANN001
                            error_type=type(exc).__name__,
                            request_id=request_id)
         else:
-            logger.info("LWA_VALIDATION_SKIPPED userId=%s siteId=%s — "
-                        "DDB says not linked, no token check needed request_id=%s",
+            # Mapping says not linked — but alexaLinked may never have been written
+            # (e.g. SMAPI two-stage flow sets isAlexaEnabled via CREATE_UPDATE_FN but
+            # does not write alexaLinked to the mapping table directly).
+            # Fall back to checking the LWA token table: if a token exists the user IS linked.
+            logger.info("LWA_MAPPING_NOT_LINKED userId=%s siteId=%s — "
+                        "falling back to token table check request_id=%s",
                         user_id, site_id, request_id)
-            _audit("LWA_TOKEN_VALIDATION_SKIPPED",
-                   userId=user_id,
-                   siteId=site_id,
-                   reason="ddb_shows_not_linked",
-                   request_id=request_id)
+            try:
+                token_result = _ddb().Table(_TOKENS_TABLE).get_item(Key={"userId": user_id})
+                token_item = token_result.get("Item")
+            except Exception as exc:
+                logger.warning("LWA_TOKEN_FALLBACK_ERROR userId=%s siteId=%s error=%s request_id=%s",
+                               user_id, site_id, exc, request_id)
+                token_item = None
+
+            if token_item:
+                linked    = True
+                linked_at = int(token_item["linkedAt"]) if token_item.get("linkedAt") else None
+                logger.info("LWA_TOKEN_FALLBACK_LINKED userId=%s siteId=%s — "
+                            "token found in %s, returning linked=True request_id=%s",
+                            user_id, site_id, _TOKENS_TABLE, request_id)
+                _audit("LWA_TOKEN_VALIDATION_SKIPPED",
+                       userId=user_id,
+                       siteId=site_id,
+                       reason="mapping_not_set_token_found",
+                       request_id=request_id)
+                # Backfill alexaLinked in mapping so future calls use the validated path.
+                try:
+                    _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
+                        Key={"userId": user_id, "siteId": site_id},
+                        UpdateExpression="SET alexaLinked = :t, alexaLinkedAt = :ts",
+                        ExpressionAttributeValues={
+                            ":t":  True,
+                            ":ts": linked_at or int(time.time()),
+                        },
+                    )
+                    logger.info("ALEXA_LINKED_BACKFILLED userId=%s siteId=%s request_id=%s",
+                                user_id, site_id, request_id)
+                except Exception as exc:
+                    logger.warning("ALEXA_LINKED_BACKFILL_ERROR userId=%s siteId=%s "
+                                   "error=%s request_id=%s", user_id, site_id, exc, request_id)
+            else:
+                logger.info("LWA_TOKEN_FALLBACK_NOT_LINKED userId=%s siteId=%s — "
+                            "no token in %s request_id=%s",
+                            user_id, site_id, _TOKENS_TABLE, request_id)
+                _audit("LWA_TOKEN_VALIDATION_SKIPPED",
+                       userId=user_id,
+                       siteId=site_id,
+                       reason="ddb_shows_not_linked",
+                       request_id=request_id)
 
         # Fetch isAlexaEnabled from user_device_details table
         logger.debug("DDB_GET_DETAILS_START table=%s userId=%s siteId=%s request_id=%s",

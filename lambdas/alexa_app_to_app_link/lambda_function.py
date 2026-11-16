@@ -1,5 +1,5 @@
 """
-alexa_start_app_to_app — POST /api/v1/alexa/startAppToApp
+alexa_app_to_app_link — POST /api/v1/alexa/startAppToApp
 
 Initiates an Alexa App-to-App account linking session.
 
@@ -131,10 +131,12 @@ def _verify_jwt_signature(token: str) -> None:
         return
     try:
         from jose import jwt as jose_jwt  # python-jose[cryptography] in requirements.txt
-    except ImportError:
+    except ImportError as _imp_exc:
         logger.error("JWT_VERIFY_UNAVAILABLE python-jose not installed — "
                      "add python-jose[cryptography] to requirements.txt")
-        return
+        raise RuntimeError(
+            "python-jose[cryptography] required for JWT verification"
+        ) from _imp_exc
     try:
         parts   = token.split(".")
         padding = "=" * (4 - len(parts[0]) % 4)

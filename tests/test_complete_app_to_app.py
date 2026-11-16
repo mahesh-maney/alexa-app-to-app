@@ -450,32 +450,12 @@ class TestCompleteAppToApp(unittest.TestCase):
         self.assertEqual(mock_sm.get_secret_value.call_count, 1)
 
 
-    # ── Skill Enablement API ──────────────────────────────────────────────────
+    # ── Amazon profile fetch (for amazonUserId reverse-lookup) ───────────────
 
     @patch("complete_fn.urllib.request.urlopen")
     @patch("complete_fn.boto3")
-    def test_skill_enablement_api_called(self, mock_boto3, mock_urlopen):
-        """urlopen must be called twice: once for LWA exchange, once for Skill Enablement."""
-        mock_resource, _, _ = _mock_ddb(session=_pending_session())
-        mock_boto3.resource.return_value = mock_resource
-        mock_boto3.client.return_value.get_secret_value.return_value = {
-            "SecretString": json.dumps({"client_id": "CID", "client_secret": "CSEC"})
-        }
-        mock_cm = MagicMock()
-        mock_cm.__enter__.return_value.read.return_value = _lwa_token_response()
-        mock_urlopen.return_value = mock_cm
-
-        fn.lambda_handler(_event(token=_make_jwt()), {})
-
-        self.assertEqual(mock_urlopen.call_count, 2)
-        second_req = mock_urlopen.call_args_list[1][0][0]
-        self.assertIn("amazonalexa.com", second_req.full_url)
-        self.assertIn("enablement", second_req.full_url)
-
-    @patch("complete_fn.urllib.request.urlopen")
-    @patch("complete_fn.boto3")
-    def test_skill_enablement_uses_access_token_as_bearer(self, mock_boto3, mock_urlopen):
-        """The Skill Enablement request must use the LWA access_token as Bearer."""
+    def test_profile_fetch_uses_access_token_as_bearer(self, mock_boto3, mock_urlopen):
+        """The Amazon profile fetch must use the LWA access_token as Bearer."""
         mock_resource, _, _ = _mock_ddb(session=_pending_session())
         mock_boto3.resource.return_value = mock_resource
         mock_boto3.client.return_value.get_secret_value.return_value = {
@@ -489,31 +469,14 @@ class TestCompleteAppToApp(unittest.TestCase):
 
         fn.lambda_handler(_event(token=_make_jwt()), {})
 
+        # Second urlopen call is the profile fetch
         second_req = mock_urlopen.call_args_list[1][0][0]
         self.assertIn("MY_AMAZON_TOKEN", second_req.get_header("Authorization"))
 
     @patch("complete_fn.urllib.request.urlopen")
     @patch("complete_fn.boto3")
-    def test_skill_enablement_url_contains_skill_id(self, mock_boto3, mock_urlopen):
-        """The Skill Enablement request URL must contain the configured skill ID."""
-        mock_resource, _, _ = _mock_ddb(session=_pending_session())
-        mock_boto3.resource.return_value = mock_resource
-        mock_boto3.client.return_value.get_secret_value.return_value = {
-            "SecretString": json.dumps({"client_id": "CID", "client_secret": "CSEC"})
-        }
-        mock_cm = MagicMock()
-        mock_cm.__enter__.return_value.read.return_value = _lwa_token_response()
-        mock_urlopen.return_value = mock_cm
-
-        fn.lambda_handler(_event(token=_make_jwt()), {})
-
-        second_req = mock_urlopen.call_args_list[1][0][0]
-        self.assertIn(fn._ALEXA_SKILL_ID, second_req.full_url)
-
-    @patch("complete_fn.urllib.request.urlopen")
-    @patch("complete_fn.boto3")
-    def test_skill_enablement_failure_returns_502(self, mock_boto3, mock_urlopen):
-        """If the Skill Enablement API returns an error, Lambda must return 502."""
+    def test_profile_fetch_failure_does_not_block_linking(self, mock_boto3, mock_urlopen):
+        """Profile fetch failure (e.g. 403 scope) is swallowed — linking still returns 200."""
         import urllib.error as uerr
 
         mock_resource, _, _ = _mock_ddb(session=_pending_session())
@@ -521,54 +484,16 @@ class TestCompleteAppToApp(unittest.TestCase):
         mock_boto3.client.return_value.get_secret_value.return_value = {
             "SecretString": json.dumps({"client_id": "CID", "client_secret": "CSEC"})
         }
-        # First call (LWA) succeeds
         lwa_cm = MagicMock()
         lwa_cm.__enter__.return_value.read.return_value = _lwa_token_response()
+        profile_err = uerr.HTTPError(url="", code=403, msg="Forbidden",
+                                     hdrs=None, fp=None)
 
-        # Second call (Skill Enablement) fails
-        skill_err = uerr.HTTPError(url="", code=400, msg="Bad Request",
-                                   hdrs=None, fp=MagicMock())
-        skill_err.read = lambda: b'{"message":"skill not found"}'
-
-        mock_urlopen.side_effect = [lwa_cm, skill_err]
+        mock_urlopen.side_effect = [lwa_cm, profile_err]
 
         resp = fn.lambda_handler(_event(token=_make_jwt()), {})
-        self.assertEqual(resp["statusCode"], 502)
-
-    @patch("complete_fn.urllib.request.urlopen")
-    @patch("complete_fn.boto3")
-    def test_tokens_not_stored_if_skill_enablement_fails(self, mock_boto3, mock_urlopen):
-        """If skill enablement fails, tokens must NOT be written to DynamoDB."""
-        import urllib.error as uerr
-
-        _, _, mock_tokens = _mock_ddb(session=_pending_session())
-        mock_resource = MagicMock()
-
-        def table_sel(name):
-            if name == fn._SESSION_TABLE:
-                t = MagicMock()
-                t.get_item.return_value = {"Item": _pending_session()}
-                return t
-            return mock_tokens
-
-        mock_resource.Table.side_effect = table_sel
-        mock_boto3.resource.return_value = mock_resource
-        mock_boto3.client.return_value.get_secret_value.return_value = {
-            "SecretString": json.dumps({"client_id": "CID", "client_secret": "CSEC"})
-        }
-        lwa_cm = MagicMock()
-        lwa_cm.__enter__.return_value.read.return_value = _lwa_token_response()
-
-        skill_err = uerr.HTTPError(url="", code=403, msg="Forbidden",
-                                   hdrs=None, fp=MagicMock())
-        skill_err.read = lambda: b'{"message":"unauthorized"}'
-
-        mock_urlopen.side_effect = [lwa_cm, skill_err]
-
-        resp = fn.lambda_handler(_event(token=_make_jwt()), {})
-
-        self.assertEqual(resp["statusCode"], 502)
-        mock_tokens.put_item.assert_not_called()
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertTrue(json.loads(resp["body"]).get("linked"))
 
 
 if __name__ == "__main__":

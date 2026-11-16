@@ -83,22 +83,23 @@ class TestAuth(unittest.TestCase):
             table = _make_table(item=None)
             mock_ddb.return_value.Table.return_value = table
             resp = fn.lambda_handler(_event(_make_jwt()), _ctx())
-        # 404 because no token record — auth passed
-        self.assertEqual(resp["statusCode"], 404)
+        # 200 (idempotent) — auth passed, no token record is treated as already-unlinked
+        self.assertEqual(resp["statusCode"], 200)
 
 
 # ── Not linked ────────────────────────────────────────────────────────────────
 
 class TestNotLinked(unittest.TestCase):
 
-    def test_no_token_record_returns_404(self):
+    def test_no_token_record_returns_200(self):
+        """Unlink is idempotent — already-unlinked returns 200, not 404."""
         with patch.object(fn, "_ddb") as mock_ddb:
             table = _make_table(item=None)
             mock_ddb.return_value.Table.return_value = table
             resp = fn.lambda_handler(_event(_make_jwt()), _ctx())
-        self.assertEqual(resp["statusCode"], 404)
+        self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
-        self.assertIn("No linked", body["error"])
+        self.assertIn("unlinked", body)
 
 
 # ── Successful unlink ─────────────────────────────────────────────────────────
