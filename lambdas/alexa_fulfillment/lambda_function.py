@@ -29,6 +29,7 @@ import uuid
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 from Crypto.Cipher import AES
 from decimal import Decimal
 
@@ -731,22 +732,47 @@ def handle_accept_grant(directive: dict) -> dict:
     # alexa_complete_app_to_app. put_item would overwrite the entire record and
     # could wipe out refreshToken if the AcceptGrant LWA exchange doesn't return
     # one, breaking the unlink-detection path in alexa_link_status.
-    update_expr = "SET accessToken = :a, expiresAt = :e"
+    now_ts = int(time.time())
+    update_expr = "SET accessToken = :a, expiresAt = :e, linkedAt = :ts"
     expr_values: dict = {
-        ":a": _encrypt_field(tokens["access_token"]),
-        ":e": 0,  # force immediate refresh on first proactive call
+        ":a":  _encrypt_field(tokens["access_token"]),
+        ":e":  0,  # force immediate refresh on first proactive call
+        ":ts": now_ts,
     }
     new_refresh = tokens.get("refresh_token", "")
     if new_refresh:
         update_expr += ", refreshToken = :r"
         expr_values[":r"] = _encrypt_field(new_refresh)
-    table.update_item(
-        Key={"userId": user_id},
-        UpdateExpression=update_expr,
-        ExpressionAttributeValues=expr_values,
-    )
-    logger.info("LWA tokens stored (KMS-encrypted) for userId=%s refresh_token_updated=%s",
-                user_id, bool(new_refresh))
+    try:
+        table.update_item(
+            Key={"userId": user_id},
+            UpdateExpression=update_expr,
+            # Only advance linkedAt — never overwrite a newer link timestamp
+            # (e.g. duplicate AcceptGrant after alexa_complete_app_to_app already ran).
+            ConditionExpression="attribute_not_exists(linkedAt) OR linkedAt < :ts",
+            ExpressionAttributeValues=expr_values,
+        )
+        logger.info("LWA tokens stored (KMS-encrypted) for userId=%s "
+                    "refresh_token_updated=%s linked_at=%d",
+                    user_id, bool(new_refresh), now_ts)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            # linkedAt is already newer — store tokens without overwriting the timestamp
+            logger.warning("ACCEPT_GRANT_LINKED_AT_NOT_UPDATED userId=%s — "
+                           "existing linkedAt newer than AcceptGrant ts=%d", user_id, now_ts)
+            update_expr_no_ts = "SET accessToken = :a, expiresAt = :e"
+            expr_no_ts: dict = {":a": expr_values[":a"], ":e": expr_values[":e"]}
+            if new_refresh:
+                update_expr_no_ts += ", refreshToken = :r"
+                expr_no_ts[":r"] = expr_values[":r"]
+            table.update_item(
+                Key={"userId": user_id},
+                UpdateExpression=update_expr_no_ts,
+                ExpressionAttributeValues=expr_no_ts,
+            )
+            logger.info("LWA tokens updated (linkedAt unchanged) for userId=%s", user_id)
+        else:
+            raise
 
     _notify_alexa_enabled_on_accept_grant(user_id)
 

@@ -21,12 +21,12 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(__file__))
 from deploy_common import (
     cfg, check_no_fill_in, check_required_keys, confirm_deploy, deploy_lambda,
-    ensure_cognito_authorizer, ensure_role, ensure_table, get_or_create_resource,
-    get_root_resource_id, load_config, log_create, log_error, log_info, log_ok,
-    log_skip, log_warn, make_client, make_policy, package_lambda, preflight_aws,
-    set_log_retention, set_step, smoke_test, st_cw, st_ddb, st_iot, st_kms,
-    st_s3, st_sm, st_stream, st_xray, step_header, verify_secret_accessible,
-    wire_cors, wire_method,
+    ensure_cognito_authorizer, ensure_gsi, ensure_role, ensure_table,
+    get_or_create_resource, get_root_resource_id, load_config, log_create,
+    log_error, log_info, log_ok, log_skip, log_warn, make_client, make_policy,
+    package_lambda, preflight_aws, set_log_retention, set_step, smoke_test,
+    st_cw, st_ddb, st_iot, st_kms, st_s3, st_sm, st_stream, st_xray,
+    step_header, verify_secret_accessible, wire_cors, wire_method,
 )
 
 try:
@@ -147,9 +147,11 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "SKILL_ENABLEMENT_URL": cfg(c, "SKILL_ENABLEMENT_URL")}
     if fn_name == "alexa_skill_server_events":
         return {**base,
-                "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
+                "LWA_TOKENS_TABLE":          cfg(c, "ALEXA_TOKENS_TABLE"),
                 "USER_DEVICE_MAPPING_TABLE": cfg(c, "USER_DEVICE_MAPPING_TABLE"),
-                "ALEXA_SKILL_ID": cfg(c, "ALEXA_SKILL_ID")}
+                "ALEXA_SKILL_ID":            cfg(c, "ALEXA_SKILL_ID"),
+                "COGNITO_USER_POOL_ID":      cfg(c, "COGNITO_USER_POOL_ID"),
+                "COGNITO_REGION":            cfg(c, "COGNITO_REGION")}
     if fn_name == "alexa_state_reporter":
         return {**base,
                 "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
@@ -262,6 +264,12 @@ def step3_ddb(session, c: dict):
     for name, pk, ttl in tables:
         ensure_table(ddb, name, pk, ttl_attr=ttl)
     log_ok(f"DDB complete  tables={len(tables)}")
+
+    # GSIs on the LWA tokens table for SkillDisabled/SkillAccountLinked user lookup
+    tokens_table = cfg(c, "ALEXA_TOKENS_TABLE")
+    ensure_gsi(ddb, tokens_table, "amazonUserId-index",    "amazonUserId")
+    ensure_gsi(ddb, tokens_table, "alexaCustomerId-index", "alexaCustomerId")
+    log_ok(f"DDB GSIs complete  table={tokens_table}")
 
 
 # ─── Step 4 — KMS Key ────────────────────────────────────────────────────────
@@ -391,9 +399,11 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
             st_sm(lwa_arn), st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms, cw, xr)),
 
         (f"{role_pre}-alexa-skill-evt-role", make_policy(
-            st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+            st_ddb(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
                    account_id, region, tokens),
-            st_ddb(["dynamodb:Query", "dynamodb:GetItem"],
+            st_ddb(["dynamodb:Query"],
+                   account_id, region, tokens, idx=True),
+            st_ddb(["dynamodb:Query", "dynamodb:GetItem", "dynamodb:UpdateItem"],
                    account_id, region, udm, idx=True),
             *tokens_kms, cw, xr)),
 

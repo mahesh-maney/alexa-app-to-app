@@ -645,18 +645,28 @@ def lambda_handler(event, context):  # noqa: ANN001
         logger.warning("AMAZON_USER_ID_MISSING userId=%s — SkillDisabled events cannot be "
                        "mapped to this user request_id=%s", user_id, request_id)
 
-    token_item: dict = {
-        "userId":       user_id,
-        "accessToken":  _encrypt_field(access_token),
-        "refreshToken": _encrypt_field(refresh_token),
-        "expiresAt":    expires_at,
-        "linkedAt":     linked_at,
-        "linkMethod":   "app-to-app",
+    # Use update_item (not put_item) to preserve alexaCustomerId stored by
+    # alexa_skill_server_events. put_item replaces the entire record and would
+    # wipe out alexaCustomerId, breaking the SkillDisabled→GSI lookup path.
+    update_expr = (
+        "SET accessToken = :a, refreshToken = :r, expiresAt = :e, "
+        "linkedAt = :ts, linkMethod = :lm"
+    )
+    expr_values: dict = {
+        ":a":  _encrypt_field(access_token),
+        ":r":  _encrypt_field(refresh_token),
+        ":e":  expires_at,
+        ":ts": linked_at,
+        ":lm": "app-to-app",
     }
     if amazon_user_id:
-        token_item["amazonUserId"] = amazon_user_id
-
-    _ddb().Table(_TOKENS_TABLE).put_item(Item=token_item)
+        update_expr += ", amazonUserId = :au"
+        expr_values[":au"] = amazon_user_id
+    _ddb().Table(_TOKENS_TABLE).update_item(
+        Key={"userId": user_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=expr_values,
+    )
     logger.debug("TOKEN_STORE_OK table=%s userId=%s request_id=%s",
                  _TOKENS_TABLE, user_id, request_id)
 
