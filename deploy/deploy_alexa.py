@@ -57,8 +57,10 @@ REQUIRED_KEYS = [
     "ALEXA_GATEWAY_URL", "IOT_DATA_ENDPOINT",
     "DEVICE_TABLE_SECRET_ARN", "DEVICE_TABLE_SECRET_REGION",
     # Stage 1 SMAPI PKCE flow
+    # PKCE_STATE_SECRET_ARN intentionally omitted — auto-created by _ensure_pkce_secret()
+    # if empty; existing ARN is verified accessible if already set.
     "SMAPI_LINKING_ENABLED", "COGNITO_ALEXA_CLIENT_ID",
-    "ALEXA_COGNITO_CALLBACK_URI", "PKCE_STATE_SECRET_ARN", "PKCE_STATE_SECRET_REGION",
+    "ALEXA_COGNITO_CALLBACK_URI", "PKCE_STATE_SECRET_REGION",
 ]
 
 # ─── Lambda definitions ───────────────────────────────────────────────────────
@@ -248,6 +250,53 @@ def step2_preflight(session, c: dict) -> str:
         log_error(f"Cannot reach {fulfillment_region}: {e}")
         sys.exit(1)
     return account_id
+
+
+# ─── Step 2b — PKCE State Secret (auto-create if absent) ─────────────────────
+
+def _ensure_pkce_secret(session, c: dict) -> None:
+    """Create the PKCE state signing secret if it doesn't exist, then patch c in-memory.
+
+    Idempotent: describe_secret is called first; the secret is only created when
+    ResourceNotFoundException is raised.  The secret value is JSON so the Lambda
+    can read it with json.loads(raw)["signing_secret"].
+    """
+    import secrets as _secrets
+    import json as _json
+
+    region      = cfg(c, "PKCE_STATE_SECRET_REGION") or cfg(c, "AWS_REGION")
+    existing    = cfg(c, "PKCE_STATE_SECRET_ARN")
+    secret_name = f"{cfg(c, 'ENV_LABEL')}/alexa/pkce-state"
+    sm          = make_client(session, "secretsmanager", region)
+
+    if existing:
+        # ARN already provided — just verify it's accessible
+        try:
+            resp = sm.describe_secret(SecretId=existing)
+            log_ok(f"PKCE_STATE_SECRET accessible  name={resp.get('Name', existing)}")
+        except Exception as e:
+            log_error(f"PKCE_STATE_SECRET_ARN set but not accessible: {e}")
+            sys.exit(1)
+        return
+
+    # ARN not set — create or retrieve by name
+    try:
+        resp = sm.describe_secret(SecretId=secret_name)
+        arn  = resp["ARN"]
+        log_ok(f"PKCE_STATE_SECRET already exists  name={secret_name}  arn={arn}")
+    except sm.exceptions.ResourceNotFoundException:
+        signing_secret = _secrets.token_urlsafe(32)
+        secret_value   = _json.dumps({"signing_secret": signing_secret})
+        resp = sm.create_secret(
+            Name=secret_name,
+            Description=f"PKCE state signing secret for Alexa app-to-app linking ({cfg(c, 'ENV_LABEL')})",
+            SecretString=secret_value,
+        )
+        arn = resp["ARN"]
+        log_create(f"PKCE_STATE_SECRET created  name={secret_name}  arn={arn}")
+
+    c["PKCE_STATE_SECRET_ARN"] = arn
+    log_info(f"PKCE_STATE_SECRET_ARN set to {arn}")
 
 
 # ─── Step 3 — DynamoDB Tables ────────────────────────────────────────────────
@@ -738,6 +787,7 @@ def main():
     session = boto3.Session(**session_kwargs)
 
     account_id = step2_preflight(session, c)
+    _ensure_pkce_secret(session, c)
 
     lambda_count_str = (
         f"{len(deploy_only)} (filtered: {', '.join(sorted(deploy_only))})"
