@@ -714,11 +714,13 @@ def step11_smoke(c: dict):
 
 def step12_manual(c: dict, account_id: str):
     step_header(12, "MANUAL POST-DEPLOY STEPS")
-    region      = cfg(c, "AWS_REGION")
-    irl_region  = cfg(c, "ALEXA_FULFILLMENT_REGION")
-    skill_id    = cfg(c, "ALEXA_SKILL_ID")
-    ds          = cfg(c, "DEVICE_STATE_TABLE")
-    udd         = cfg(c, "USER_DEVICE_DETAILS_TABLE")
+    region          = cfg(c, "AWS_REGION")
+    irl_region      = cfg(c, "ALEXA_FULFILLMENT_REGION")
+    skill_id        = cfg(c, "ALEXA_SKILL_ID")
+    ds              = cfg(c, "DEVICE_STATE_TABLE")
+    udd             = cfg(c, "USER_DEVICE_DETAILS_TABLE")
+    api_base        = cfg(c, "API_BASE_URL").rstrip("/")
+    skill_event_url = f"{api_base}/alexa/skill-event"
     fulfillment_arn = f"arn:aws:lambda:{irl_region}:{account_id}:function:alexa_fulfillment"
 
     log_warn("The following steps CANNOT be automated — complete them manually:\n")
@@ -746,6 +748,15 @@ def step12_manual(c: dict, account_id: str):
     print(f"  4. Register Lambda ARN in Alexa Developer Console:")
     print(f"     Developer Console → Your Skill → Build → Endpoint")
     print(f"     Default endpoint: {fulfillment_arn}")
+    print()
+    print(f"  5. Register skill events endpoint in Alexa Developer Console:")
+    print(f"     Developer Console → Your Skill → Build → Permissions")
+    print(f"     Enable: 'Alexa Skills Kit' → 'Events'")
+    print(f"     Set HTTPS endpoint to: {skill_event_url}")
+    print(f"     Subscribe to events:")
+    print(f"       - AlexaSkillEvent.SkillAccountLinked")
+    print(f"       - AlexaSkillEvent.SkillDisabled")
+    print(f"     (Without this, unlink-from-Alexa-app will NOT clear alexaLinked in Digilux)")
     print()
 
 
