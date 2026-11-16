@@ -31,6 +31,7 @@ import urllib.parse
 import urllib.request
 
 import boto3
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "DEBUG").upper(), logging.DEBUG))
@@ -55,6 +56,8 @@ _COGNITO_REGION       = os.environ.get("COGNITO_REGION",       _REGION or "")
 _LWA_SECRET_ARN       = os.environ.get("LWA_SECRET_ARN",
                             "arn:aws:secretsmanager:eu-west-1:986906626244:secret:digilux/alexa/lwa-7RDOUm")
 _KMS_KEY_ARN          = os.environ.get("KMS_KEY_ARN", "")
+_ALEXA_SKILL_ID       = os.environ.get("ALEXA_SKILL_ID",        "")
+_SKILL_ENABLEMENT_URL = os.environ.get("SKILL_ENABLEMENT_URL",  "")
 _COGNITO_ISSUER = (
     f"https://cognito-idp.{_COGNITO_REGION}.amazonaws.com/{_COGNITO_USER_POOL_ID}"
     if _COGNITO_USER_POOL_ID else ""
@@ -150,7 +153,40 @@ def _get_lwa_secret() -> dict:
     return _lwa_secret_cache
 
 
-def _validate_lwa_token(user_id: str, request_id: str) -> bool:
+def _check_skill_enabled(access_token: str, request_id: str):
+    """
+    Call SMAPI GET /v1/users/~current/skills/{skillId} to check if skill is enabled.
+    Returns True (enabled), False (disabled/not found), or None (cannot determine).
+    """
+    if not access_token or not _ALEXA_SKILL_ID or not _SKILL_ENABLEMENT_URL:
+        logger.debug("SMAPI_SKILL_CHECK_SKIP reason=missing_config request_id=%s", request_id)
+        return None
+    url = f"{_SKILL_ENABLEMENT_URL}/{_ALEXA_SKILL_ID}"
+    try:
+        req = urllib.request.Request(
+            url, method="GET",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            logger.info("SMAPI_SKILL_CHECK_ENABLED http=200 request_id=%s", request_id)
+            return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            logger.info("SMAPI_SKILL_CHECK_DISABLED http=404 — skill not enabled request_id=%s",
+                        request_id)
+            return False
+        if exc.code in (401, 403):
+            logger.warning("SMAPI_SKILL_CHECK_AUTH_ERROR http=%s request_id=%s",
+                           exc.code, request_id)
+            return None
+        logger.warning("SMAPI_SKILL_CHECK_HTTP_ERROR http=%s request_id=%s", exc.code, request_id)
+        return None
+    except Exception as exc:
+        logger.warning("SMAPI_SKILL_CHECK_ERROR error=%s request_id=%s", exc, request_id)
+        return None
+
+
+def _validate_lwa_token(user_id: str, request_id: str, linked_at: int | None = None) -> bool:
     """
     Verify the user's LWA refresh token is still valid by attempting a refresh.
 
@@ -159,6 +195,10 @@ def _validate_lwa_token(user_id: str, request_id: str) -> bool:
     alexaLinked in DynamoDB so the Flutter app shows the correct state on the
     next status check — compensating for Amazon not delivering SkillDisabled
     events reliably to Smart Home skill endpoints.
+
+    linked_at: epoch of alexaLinkedAt from the mapping table. Used to detect stale
+    no-token state: if alexaLinked=True but no token record exists for >5 minutes,
+    the token was deleted without clearing the mapping — treat as unlinked.
 
     Returns True  → token valid, skill still linked.
     Returns False → token revoked, skill disabled.
@@ -194,15 +234,34 @@ def _validate_lwa_token(user_id: str, request_id: str) -> bool:
         return True
 
     if not token_item:
-        logger.info("LWA_VALIDATE_NO_TOKEN userId=%s table=%s — no token record, "
-                    "skill was never linked via this flow request_id=%s",
-                    user_id, _TOKENS_TABLE, request_id)
+        # No LWA token record. Two possible states:
+        #   a) AcceptGrant hasn't fired yet (legitimate transient window, seconds)
+        #   b) Token was deleted without clearing alexaLinked (stale mapping)
+        # We distinguish by age: if alexaLinkedAt is recent (<5 min), trust the
+        # mapping (AcceptGrant likely pending). If old, the state is stale — unlink.
+        _TOKEN_GRACE_SECONDS = 3600  # 1 hour
+        age_seconds = int(time.time()) - linked_at if linked_at is not None else 0
+        if linked_at is not None and age_seconds > _TOKEN_GRACE_SECONDS:
+            logger.info("LWA_VALIDATE_NO_TOKEN_STALE userId=%s table=%s linked_at_age=%ds — "
+                        "no token and alexaLinked is stale; treating as unlinked request_id=%s",
+                        user_id, _TOKENS_TABLE, age_seconds, request_id)
+            _audit("LWA_TOKEN_RECORD_MISSING",
+                   userId=user_id,
+                   table=_TOKENS_TABLE,
+                   linked_at_age_seconds=age_seconds,
+                   outcome="stale_no_token_treating_as_unlinked",
+                   request_id=request_id)
+            return False
+        logger.info("LWA_VALIDATE_NO_TOKEN userId=%s table=%s linked_at_age=%ss — "
+                    "no token record, AcceptGrant may still be pending; trusting mapping table "
+                    "request_id=%s",
+                    user_id, _TOKENS_TABLE, age_seconds if linked_at else "unknown", request_id)
         _audit("LWA_TOKEN_RECORD_MISSING",
                userId=user_id,
                table=_TOKENS_TABLE,
-               outcome="treating_as_unlinked",
+               outcome="accept_grant_pending_trust_mapping_table",
                request_id=request_id)
-        return False
+        return True
 
     logger.debug("LWA_VALIDATE_TOKEN_FOUND userId=%s token_keys=%s request_id=%s",
                  user_id, list(token_item.keys()), request_id)
@@ -213,10 +272,46 @@ def _validate_lwa_token(user_id: str, request_id: str) -> bool:
     refresh_token = _decrypt_field(raw_refresh)
 
     if not refresh_token:
+        # No refresh token — try SMAPI to detect if skill was disabled from the Alexa app.
+        # Amazon doesn't deliver AccountLinking.Removed for dev skills, so we compensate.
+        # SMAPI is only reliable for Alexa-app-initiated links (AcceptGrant path, no linkMethod).
+        # For app-to-app links (linkMethod="app-to-app"), SMAPI always returns 404 regardless
+        # of link state — skip SMAPI to avoid false-positive unlinks.
+        link_method = token_item.get("linkMethod", "")
+        raw_access = token_item.get("accessToken", "")
+        if link_method != "app-to-app" and isinstance(raw_access, str) and raw_access.startswith("Atza|"):
+            skill_enabled = _check_skill_enabled(raw_access, request_id)
+            if skill_enabled is False:
+                logger.info("LWA_VALIDATE_SMAPI_DISABLED userId=%s raw_present=%s "
+                            "request_id=%s — SMAPI confirms skill disabled; treating as unlinked",
+                            user_id, bool(raw_refresh), request_id)
+                _audit("LWA_VALIDATE_NO_REFRESH_TOKEN",
+                       userId=user_id,
+                       raw_present=bool(raw_refresh),
+                       outcome="smapi_says_disabled",
+                       request_id=request_id)
+                return False
+            if skill_enabled is True:
+                logger.info("LWA_VALIDATE_SMAPI_ENABLED userId=%s raw_present=%s "
+                            "request_id=%s — SMAPI confirms skill still enabled",
+                            user_id, bool(raw_refresh), request_id)
+                _audit("LWA_VALIDATE_NO_REFRESH_TOKEN",
+                       userId=user_id,
+                       raw_present=bool(raw_refresh),
+                       outcome="smapi_says_enabled",
+                       request_id=request_id)
+                return True
+        # Cannot validate (no refreshToken, no plain-text accessToken, or SMAPI inconclusive)
         logger.warning("LWA_VALIDATE_NO_REFRESH_TOKEN userId=%s "
-                       "raw_present=%s request_id=%s",
+                       "raw_present=%s request_id=%s — "
+                       "cannot validate without refresh token; assuming still linked",
                        user_id, bool(raw_refresh), request_id)
-        return True  # Can't validate without refresh token
+        _audit("LWA_VALIDATE_NO_REFRESH_TOKEN",
+               userId=user_id,
+               raw_present=bool(raw_refresh),
+               outcome="assumed_valid_cannot_validate",
+               request_id=request_id)
+        return True  # Cannot validate — don't auto-unlink
 
     logger.debug("LWA_VALIDATE_DECRYPT_OK userId=%s plaintext_len=%d request_id=%s",
                  user_id, len(refresh_token), request_id)
@@ -253,14 +348,25 @@ def _validate_lwa_token(user_id: str, request_id: str) -> bool:
                outcome="skill_still_active",
                request_id=request_id)
 
-        # Refresh succeeded — update stored access token for future use
+        # Refresh succeeded — update stored access token; use ConditionExpression to
+        # prevent upsert-creating a minimal record if the full record was deleted.
         logger.debug("LWA_ACCESS_TOKEN_UPDATE_START userId=%s table=%s request_id=%s",
                      user_id, _TOKENS_TABLE, request_id)
-        _ddb().Table(_TOKENS_TABLE).update_item(
-            Key={"userId": user_id},
-            UpdateExpression="SET accessToken = :a",
-            ExpressionAttributeValues={":a": new_tokens["access_token"]},
-        )
+        try:
+            _ddb().Table(_TOKENS_TABLE).update_item(
+                Key={"userId": user_id},
+                UpdateExpression="SET accessToken = :a",
+                ExpressionAttributeValues={":a": new_tokens["access_token"]},
+                ConditionExpression="attribute_exists(refreshToken)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                logger.warning("LWA_ACCESS_TOKEN_UPDATE_SKIPPED userId=%s — "
+                               "refreshToken field missing, not creating minimal record "
+                               "request_id=%s", user_id, request_id)
+            else:
+                logger.error("LWA_ACCESS_TOKEN_UPDATE_ERROR userId=%s error=%s request_id=%s",
+                             user_id, exc, request_id)
         logger.info("LWA_TOKEN_VALID userId=%s — skill still linked, "
                     "access token refreshed request_id=%s", user_id, request_id)
         _audit("LWA_ACCESS_TOKEN_UPDATED",
@@ -533,7 +639,7 @@ def lambda_handler(event, context):  # noqa: ANN001
                    endpoint="https://api.amazon.com/auth/o2/token",
                    request_id=request_id)
 
-            still_valid = _validate_lwa_token(user_id, request_id)
+            still_valid = _validate_lwa_token(user_id, request_id, linked_at=linked_at)
             logger.info("LWA_VALIDATION_RESULT userId=%s siteId=%s still_valid=%s request_id=%s",
                         user_id, site_id, still_valid, request_id)
 
@@ -617,31 +723,83 @@ def lambda_handler(event, context):  # noqa: ANN001
                 token_item = None
 
             if token_item:
-                linked    = True
-                linked_at = int(token_item["linkedAt"]) if token_item.get("linkedAt") else None
-                logger.info("LWA_TOKEN_FALLBACK_LINKED userId=%s siteId=%s — "
-                            "token found in %s, returning linked=True request_id=%s",
-                            user_id, site_id, _TOKENS_TABLE, request_id)
-                _audit("LWA_TOKEN_VALIDATION_SKIPPED",
-                       userId=user_id,
-                       siteId=site_id,
-                       reason="mapping_not_set_token_found",
-                       request_id=request_id)
-                # Backfill alexaLinked in mapping so future calls use the validated path.
-                try:
-                    _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
-                        Key={"userId": user_id, "siteId": site_id},
-                        UpdateExpression="SET alexaLinked = :t, alexaLinkedAt = :ts",
-                        ExpressionAttributeValues={
-                            ":t":  True,
-                            ":ts": linked_at or int(time.time()),
-                        },
-                    )
-                    logger.info("ALEXA_LINKED_BACKFILLED userId=%s siteId=%s request_id=%s",
+                # If the token record has no refreshToken, it was created by an AcceptGrant
+                # retry after unlink (update_item upsert without refreshToken). A legitimate
+                # link always has refreshToken from alexa_complete_app_to_app's put_item.
+                # Don't backfill alexaLinked=True for a stale record.
+                fb_raw_refresh = token_item.get("refreshToken", "")
+                if not fb_raw_refresh:
+                    linked = False
+                    logger.info("LWA_TOKEN_FALLBACK_NO_REFRESH userId=%s siteId=%s — "
+                                "token exists but no refreshToken; stale AcceptGrant upsert, "
+                                "deleting and returning unlinked request_id=%s",
                                 user_id, site_id, request_id)
-                except Exception as exc:
-                    logger.warning("ALEXA_LINKED_BACKFILL_ERROR userId=%s siteId=%s "
-                                   "error=%s request_id=%s", user_id, site_id, exc, request_id)
+                    _audit("LWA_TOKEN_FALLBACK_STALE",
+                           userId=user_id,
+                           siteId=site_id,
+                           reason="no_refresh_token_in_record",
+                           outcome="stale_token_deleted",
+                           request_id=request_id)
+                    try:
+                        _ddb().Table(_TOKENS_TABLE).delete_item(Key={"userId": user_id})
+                    except Exception as exc:
+                        logger.warning("LWA_TOKEN_FALLBACK_DELETE_ERROR userId=%s siteId=%s "
+                                       "error=%s request_id=%s", user_id, site_id, exc, request_id)
+                else:
+                    # Has refreshToken — validate with Amazon before backfilling.
+                    logger.info("LWA_TOKEN_FALLBACK_VALIDATE userId=%s siteId=%s — "
+                                "token found, validating with Amazon before backfill "
+                                "request_id=%s",
+                                user_id, site_id, request_id)
+                    fallback_valid = _validate_lwa_token(user_id, request_id)
+
+                    if fallback_valid:
+                        # LWA refresh succeeded — treat as linked and backfill.
+                        # SMAPI is intentionally NOT used here. For dev skills Amazon does not
+                        # revoke LWA tokens on Alexa-app-unlink, making SMAPI unreliable (always
+                        # returns 404 regardless of link state). The previous SMAPI cross-check
+                        # here caused false-positive token deletions that reset the UI incorrectly.
+                        # Genuine unlinks (production) are caught by the "DDB says linked" path
+                        # above when LWA refresh returns 400/401.
+                        linked_at = int(token_item["linkedAt"]) if token_item.get("linkedAt") else None
+                        linked    = True
+                        logger.info("LWA_TOKEN_FALLBACK_LINKED userId=%s siteId=%s — "
+                                    "backfilling alexaLinked request_id=%s",
+                                    user_id, site_id, request_id)
+                        _audit("LWA_TOKEN_FALLBACK_LINKED",
+                               userId=user_id,
+                               siteId=site_id,
+                               outcome="backfilling_alexaLinked",
+                               request_id=request_id)
+                        try:
+                            _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
+                                Key={"userId": user_id, "siteId": site_id},
+                                UpdateExpression="SET alexaLinked = :t, alexaLinkedAt = :ts",
+                                ExpressionAttributeValues={
+                                    ":t":  True,
+                                    ":ts": linked_at or int(time.time()),
+                                },
+                            )
+                            logger.info("ALEXA_LINKED_BACKFILLED userId=%s siteId=%s request_id=%s",
+                                        user_id, site_id, request_id)
+                        except Exception as exc:
+                            logger.warning("ALEXA_LINKED_BACKFILL_ERROR userId=%s siteId=%s "
+                                           "error=%s request_id=%s", user_id, site_id, exc, request_id)
+                    else:
+                        linked = False
+                        logger.info("LWA_TOKEN_FALLBACK_STALE userId=%s siteId=%s — "
+                                    "token invalid per Amazon; deleting stale record request_id=%s",
+                                    user_id, site_id, request_id)
+                        _audit("LWA_TOKEN_FALLBACK_STALE",
+                               userId=user_id,
+                               siteId=site_id,
+                               outcome="stale_token_deleted",
+                               request_id=request_id)
+                        try:
+                            _ddb().Table(_TOKENS_TABLE).delete_item(Key={"userId": user_id})
+                        except Exception as exc:
+                            logger.warning("LWA_TOKEN_FALLBACK_DELETE_ERROR userId=%s siteId=%s "
+                                           "error=%s request_id=%s", user_id, site_id, exc, request_id)
             else:
                 logger.info("LWA_TOKEN_FALLBACK_NOT_LINKED userId=%s siteId=%s — "
                             "no token in %s request_id=%s",

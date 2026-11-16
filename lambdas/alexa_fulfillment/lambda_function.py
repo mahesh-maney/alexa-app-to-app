@@ -51,6 +51,7 @@ _SCENE_TABLE        = os.environ.get("SCENE_TABLE",               "digilux_scene
 _DEVICE_STATE_TABLE = os.environ.get("DEVICE_STATE_TABLE",        "device_state")
 _METADATA_BUCKET    = os.environ.get("METADATA_BUCKET",           "digilux-metadata-bucket")
 _CREATE_UPDATE_FN   = os.environ.get("CREATE_UPDATE_FN",          "")
+_KMS_KEY_ARN        = os.environ.get("KMS_KEY_ARN",               "")
 
 _TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 _GATEWAY_URL = os.environ.get("ALEXA_GATEWAY_URL", "https://api.eu.amazonalexa.com/v3/events")
@@ -71,6 +72,7 @@ _s3 = None
 _iot = None
 _bridge_cache: dict = {}  # {duid: bridge_addr} — warm across invocations
 _lambda_client = None
+_kms_cache = None
 
 
 # ── AWS clients ───────────────────────────────────────────────────────────────
@@ -101,6 +103,35 @@ def _get_lambda_client():
     if _lambda_client is None:
         _lambda_client = boto3.client("lambda", region_name=_DATA_REGION)
     return _lambda_client
+
+
+def _kms_client():
+    global _kms_cache
+    if _kms_cache is None:
+        _kms_cache = boto3.client("kms", region_name=_DATA_REGION)
+    return _kms_cache
+
+
+def _encrypt_field(plaintext: str) -> str:
+    """KMS-encrypt a string and return base64-encoded ciphertext (same format as alexa_complete_app_to_app)."""
+    if not _KMS_KEY_ARN:
+        raise RuntimeError("KMS_KEY_ARN not configured — cannot store LWA tokens securely")
+    response = _kms_client().encrypt(KeyId=_KMS_KEY_ARN, Plaintext=plaintext.encode())
+    return base64.b64encode(response["CiphertextBlob"]).decode()
+
+
+def _decrypt_field(value: str) -> str:
+    """Decrypt a KMS-encrypted base64 field. Falls back to plaintext for legacy unencrypted records."""
+    if not _KMS_KEY_ARN:
+        return value
+    try:
+        ciphertext = base64.b64decode(value.encode())
+        response = _kms_client().decrypt(CiphertextBlob=ciphertext)
+        return response["Plaintext"].decode()
+    except Exception:
+        # Legacy record stored before KMS encryption was added to AcceptGrant
+        logger.warning("TOKEN_LEGACY_PLAINTEXT userId=unknown — token not KMS-encrypted; treating as plaintext")
+        return value
 
 
 def _notify_alexa_enabled(user_id: str, site_id: str) -> None:
@@ -215,10 +246,10 @@ def _get_valid_token(user_id: str) -> str | None:
     if not item:
         return None
     if int(item["expiresAt"]) > time.time():
-        return item["accessToken"]
+        return _decrypt_field(item["accessToken"])
     client_id, client_secret = _get_lwa_creds()
     data = urllib.parse.urlencode({
-        "grant_type": "refresh_token", "refresh_token": item["refreshToken"],
+        "grant_type": "refresh_token", "refresh_token": _decrypt_field(item["refreshToken"]),
         "client_id": client_id, "client_secret": client_secret,
     }).encode()
     req = urllib.request.Request(_TOKEN_URL, data=data,
@@ -229,7 +260,7 @@ def _get_valid_token(user_id: str) -> str | None:
     new_expiry = int(time.time()) + int(body.get("expires_in", 3600)) - 60
     table.update_item(Key={"userId": user_id},
         UpdateExpression="SET accessToken = :t, expiresAt = :e",
-        ExpressionAttributeValues={":t": new_token, ":e": new_expiry})
+        ExpressionAttributeValues={":t": _encrypt_field(new_token), ":e": new_expiry})
     return new_token
 
 
@@ -696,13 +727,26 @@ def handle_accept_grant(directive: dict) -> dict:
     tokens = _exchange_lwa_code(code)
 
     table = _ddb().Table(_LWA_TOKENS_TABLE)
-    table.put_item(Item={
-        "userId":       user_id,
-        "accessToken":  tokens["access_token"],
-        "refreshToken": tokens["refresh_token"],
-        "expiresAt":    0,  # force immediate refresh on first proactive call
-    })
-    logger.info("LWA tokens stored for userId=%s", user_id)
+    # Use update_item (not put_item) so we preserve the refreshToken stored by
+    # alexa_complete_app_to_app. put_item would overwrite the entire record and
+    # could wipe out refreshToken if the AcceptGrant LWA exchange doesn't return
+    # one, breaking the unlink-detection path in alexa_link_status.
+    update_expr = "SET accessToken = :a, expiresAt = :e"
+    expr_values: dict = {
+        ":a": _encrypt_field(tokens["access_token"]),
+        ":e": 0,  # force immediate refresh on first proactive call
+    }
+    new_refresh = tokens.get("refresh_token", "")
+    if new_refresh:
+        update_expr += ", refreshToken = :r"
+        expr_values[":r"] = _encrypt_field(new_refresh)
+    table.update_item(
+        Key={"userId": user_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=expr_values,
+    )
+    logger.info("LWA tokens stored (KMS-encrypted) for userId=%s refresh_token_updated=%s",
+                user_id, bool(new_refresh))
 
     _notify_alexa_enabled_on_accept_grant(user_id)
 

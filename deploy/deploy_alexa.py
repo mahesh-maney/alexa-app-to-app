@@ -142,7 +142,9 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "USER_DEVICE_DETAILS_TABLE": cfg(c, "USER_DEVICE_DETAILS_TABLE"),
                 "LWA_SECRET_ARN": cfg(c, "LWA_SECRET_ARN"),
                 "LWA_SECRET_REGION": cfg(c, "LWA_SECRET_REGION"),
-                "KMS_KEY_ARN": kms_key_arn}
+                "KMS_KEY_ARN": kms_key_arn,
+                "ALEXA_SKILL_ID": cfg(c, "ALEXA_SKILL_ID"),
+                "SKILL_ENABLEMENT_URL": cfg(c, "SKILL_ENABLEMENT_URL")}
     if fn_name == "alexa_skill_server_events":
         return {**base,
                 "LWA_TOKENS_TABLE": cfg(c, "ALEXA_TOKENS_TABLE"),
@@ -195,6 +197,7 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "COGNITO_REGION":          cfg(c, "COGNITO_REGION"),
                 "PKCE_TABLE":              cfg(c, "ALEXA_PKCE_TABLE"),
                 "LWA_TOKENS_TABLE":        cfg(c, "ALEXA_TOKENS_TABLE"),
+                "USER_DEVICE_MAPPING_TABLE": cfg(c, "USER_DEVICE_MAPPING_TABLE"),
                 "KMS_KEY_ARN":             kms_key_arn,
                 "COGNITO_HOSTED_UI_DOMAIN": cfg(c, "COGNITO_HOSTED_UI_DOMAIN"),
                 "COGNITO_ALEXA_CLIENT_ID": cfg(c, "COGNITO_ALEXA_CLIENT_ID"),
@@ -414,7 +417,7 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, ds,  idx=True),
             st_ddb(["dynamodb:Query", "dynamodb:GetItem"], account_id, region, scene, idx=True),
             st_s3(bucket), st_sm(lwa_arn, ep_arn, dt_arn),
-            st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms,
+            st_kms(kms_key_arn, ["kms:Decrypt", "kms:Encrypt"]), *tokens_kms,
             st_iot(account_id, region),
             cw_irl, xr)),   # CW Logs in Ireland — Lambda writes logs where it runs
 
@@ -422,6 +425,7 @@ def step6_iam(session, c: dict, account_id: str, kms_key_arn: str) -> dict:
             st_ddb(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
                    account_id, region, cfg(c, "ALEXA_PKCE_TABLE")),
             st_ddb(["dynamodb:GetItem"], account_id, region, tokens),
+            st_ddb(["dynamodb:UpdateItem"], account_id, region, udm),
             st_sm(cfg(c, "PKCE_STATE_SECRET_ARN")),
             st_kms(kms_key_arn, ["kms:Decrypt"]), *tokens_kms,
             {"Effect": "Allow", "Action": "lambda:InvokeFunction",

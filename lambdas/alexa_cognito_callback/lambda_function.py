@@ -57,8 +57,9 @@ logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), lo
 
 # ── Environment variables ──────────────────────────────────────────────────────
 _REGION                   = os.environ.get("DATA_REGION",               "")
-_PKCE_TABLE               = os.environ.get("PKCE_TABLE",                "")
-_LWA_TOKENS_TABLE         = os.environ.get("LWA_TOKENS_TABLE",          "")
+_PKCE_TABLE                    = os.environ.get("PKCE_TABLE",                 "")
+_LWA_TOKENS_TABLE              = os.environ.get("LWA_TOKENS_TABLE",             "")
+_USER_DEVICE_MAPPING_TABLE     = os.environ.get("USER_DEVICE_MAPPING_TABLE",    "")
 _KMS_KEY_ARN              = os.environ.get("KMS_KEY_ARN",               "")
 _COGNITO_CALLBACK_URI     = os.environ.get("COGNITO_CALLBACK_URI",     "")
 _PKCE_STATE_SECRET_ARN    = os.environ.get("PKCE_STATE_SECRET_ARN",    "")
@@ -417,9 +418,14 @@ def lambda_handler(event, context):  # noqa: ANN001
                      exc, user_id, request_id)
         return _deep_link(False, "lwa_token_missing")
 
-    # ── 6. Skill Enablement POST (enable + account link) — blocking ────────────
+    # ── 6. Skill Enablement POST (enable + account link) — best-effort ───────────
     # Pass the unconsumed Cognito auth code so Alexa can exchange it at the
     # skill Access Token URL (Cognito /oauth2/token when configured that way).
+    # NOTE: This call fails with 404 for dev-stage skills (Amazon limitation).
+    # It is non-fatal: the user has successfully authenticated and the LWA token
+    # is valid. We proceed to write alexaLinked=True regardless. When the skill
+    # is published, SMAPI will succeed and the skill will appear linked in the
+    # Alexa app immediately; AcceptGrant will fire and confirm the link.
     smapi_verified = _check_smapi_enablement(
         lwa_access_token=lwa_access_token,
         auth_code=code,
@@ -429,8 +435,9 @@ def lambda_handler(event, context):  # noqa: ANN001
         request_id=request_id,
     )
     if not smapi_verified:
-        logger.error("SMAPI_ENABLE_FAILED userId=%s request_id=%s", user_id, request_id)
-        return _deep_link(False, "skill_enablement_failed")
+        logger.warning("SMAPI_ENABLE_FAILED userId=%s — skill not enabled via SMAPI "
+                       "(dev-stage limitation); proceeding with linking request_id=%s",
+                       user_id, request_id)
 
     # ── 7. Mark PKCE transaction COGNITO_VERIFIED + release per-user lock ──────
     lock_key = f"LOCK#{user_id}"
@@ -466,7 +473,29 @@ def lambda_handler(event, context):  # noqa: ANN001
         logger.warning("PKCE_LOCK_RELEASE_FAILED userId=%s error=%s request_id=%s",
                        user_id, exc, request_id)
 
-    # ── 8. Fire CREATE_UPDATE_FN → isAlexaEnabled=true ───────────────────────
+    # ── 8a. Write alexaLinked=True to mapping table immediately ──────────────
+    # AcceptGrant (which stores the LWA token) fires asynchronously AFTER SMAPI
+    # PUT returns. If the Flutter app reloads the status screen before AcceptGrant
+    # completes, alexa_link_status sees no token and returns linked=False.
+    # Writing alexaLinked=True here ensures the status check's primary path
+    # (mapping table lookup) returns linked=True right away.
+    if site_id and _USER_DEVICE_MAPPING_TABLE:
+        try:
+            _ddb().Table(_USER_DEVICE_MAPPING_TABLE).update_item(
+                Key={"userId": user_id, "siteId": site_id},
+                UpdateExpression="SET alexaLinked = :t, alexaLinkedAt = :ts",
+                ExpressionAttributeValues={
+                    ":t":  True,
+                    ":ts": int(time.time()),
+                },
+            )
+            logger.info("ALEXA_LINKED_WRITTEN userId=%s siteId=%s request_id=%s",
+                        user_id, site_id, request_id)
+        except Exception as exc:
+            logger.warning("ALEXA_LINKED_WRITE_ERROR userId=%s siteId=%s error=%s request_id=%s",
+                           user_id, site_id, exc, request_id)
+
+    # ── 8b. Fire CREATE_UPDATE_FN → isAlexaEnabled=true ──────────────────────
     _notify_alexa_enabled(user_id, site_id, request_id)
 
     logger.info("[AUDIT] ALEXA_LINKED userId=%s siteId=%s smapi_verified=%s "

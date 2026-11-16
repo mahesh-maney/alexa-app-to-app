@@ -105,12 +105,18 @@ def _kms():
 
 def _decrypt_field(value: str) -> str:
     """Decrypt a KMS-encrypted base64 string back to plaintext.
-    Returns value unchanged if KMS_KEY_ARN is not configured."""
+    Falls back to treating the value as plaintext for legacy records stored before
+    KMS encryption was added to AcceptGrant (alexa_fulfillment)."""
     if not _KMS_KEY_ARN:
         return value
-    ciphertext = base64.b64decode(value.encode())
-    response   = _kms().decrypt(CiphertextBlob=ciphertext)
-    return response["Plaintext"].decode()
+    try:
+        ciphertext = base64.b64decode(value.encode())
+        response   = _kms().decrypt(CiphertextBlob=ciphertext)
+        return response["Plaintext"].decode()
+    except Exception:
+        # Legacy record: AcceptGrant stored the token as plaintext before the fix.
+        logger.warning("TOKEN_LEGACY_PLAINTEXT — token was not KMS-encrypted; treating as plaintext")
+        return value
 
 
 def _get_lwa_creds() -> tuple[str, str]:
@@ -195,38 +201,81 @@ def _decode_jwt_sub(token: str) -> str:
     return sub
 
 
+# All three Amazon SMAPI regional base hosts — tried in order on "Incorrect endpoint" errors.
+_SMAPI_REGIONAL_HOSTS = [
+    "api.amazonalexa.com",       # North America / US
+    "api.eu.amazonalexa.com",    # Europe / India
+    "api.fe.amazonalexa.com",    # Far East
+]
+
+
+def _smapi_delete_urls() -> list[str]:
+    """Return DELETE /enablement URLs: primary host first, then the other two regions."""
+    if not _SKILL_ENABLEMENT_URL or not _ALEXA_SKILL_ID:
+        return []
+    parsed = urllib.parse.urlparse(_SKILL_ENABLEMENT_URL)
+    primary_host = parsed.netloc
+    path = parsed.path.rstrip("/")
+    suffix = f"/{_ALEXA_SKILL_ID}/enablement"
+    primary_url = f"{parsed.scheme}://{primary_host}{path}{suffix}"
+    fallbacks = [
+        f"{parsed.scheme}://{h}{path}{suffix}"
+        for h in _SMAPI_REGIONAL_HOSTS if h != primary_host
+    ]
+    return [primary_url] + fallbacks
+
+
 def _disable_alexa_skill(access_token: str, user_id: str, request_id: str) -> None:
     """
     Call the Alexa Skill Disablement API (best-effort).
+    Retries across all three SMAPI regional endpoints when Amazon returns
+    "Incorrect endpoint for customer" (400), which happens when the user's Amazon
+    account marketplace does not match the primary configured endpoint.
+    Treats 404 as success (skill already unlinked on Amazon's side).
     Logs failure but does NOT raise — unlink proceeds regardless.
     """
-    if not _SKILL_ENABLEMENT_URL or not _ALEXA_SKILL_ID:
+    urls = _smapi_delete_urls()
+    if not urls:
         logger.warning("SKILL_DISABLE_SKIPPED missing SKILL_ENABLEMENT_URL or ALEXA_SKILL_ID "
                        "userId=%s request_id=%s", user_id, request_id)
         return
 
-    url = f"{_SKILL_ENABLEMENT_URL}/{_ALEXA_SKILL_ID}/enablement"
-    logger.debug("SKILL_DISABLE_START url=%s userId=%s request_id=%s",
-                 url, user_id, request_id)
+    for url in urls:
+        logger.info("SKILL_DISABLE_ATTEMPT url=%s userId=%s request_id=%s",
+                    url, user_id, request_id)
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_LWA_HTTP_TIMEOUT):
+                pass
+            logger.info("SKILL_DISABLE_OK skill_id=%s url=%s userId=%s request_id=%s",
+                        _ALEXA_SKILL_ID, url, user_id, request_id)
+            return
+        except urllib.error.HTTPError as e:
+            err = (e.read() if e.fp is not None else b"").decode(errors="replace")
+            if e.code == 404:
+                # Already unlinked on Amazon's side — treat as success.
+                logger.info("SKILL_DISABLE_ALREADY_UNLINKED skill_id=%s url=%s "
+                            "userId=%s request_id=%s", _ALEXA_SKILL_ID, url, user_id, request_id)
+                return
+            if e.code == 400 and "Incorrect endpoint for customer" in err:
+                logger.warning("SKILL_DISABLE_WRONG_ENDPOINT url=%s — retrying next region "
+                               "userId=%s request_id=%s", url, user_id, request_id)
+                continue
+            logger.warning("SKILL_DISABLE_HTTP_ERROR skill_id=%s status=%d body=%s "
+                           "url=%s userId=%s request_id=%s",
+                           _ALEXA_SKILL_ID, e.code, err, url, user_id, request_id)
+            return
+        except Exception as exc:
+            logger.warning("SKILL_DISABLE_ERROR skill_id=%s error=%s url=%s userId=%s request_id=%s",
+                           _ALEXA_SKILL_ID, exc, url, user_id, request_id)
+            return
 
-    req = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {access_token}"},
-        method="DELETE",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_LWA_HTTP_TIMEOUT):
-            pass
-        logger.info("SKILL_DISABLE_OK skill_id=%s userId=%s request_id=%s",
-                    _ALEXA_SKILL_ID, user_id, request_id)
-    except urllib.error.HTTPError as e:
-        err = (e.read() if e.fp is not None else b"").decode(errors="replace")
-        logger.warning("SKILL_DISABLE_HTTP_ERROR skill_id=%s status=%d body=%s "
-                       "userId=%s request_id=%s",
-                       _ALEXA_SKILL_ID, e.code, err, user_id, request_id)
-    except Exception as exc:
-        logger.warning("SKILL_DISABLE_ERROR skill_id=%s error=%s userId=%s request_id=%s",
-                       _ALEXA_SKILL_ID, exc, user_id, request_id)
+    logger.warning("SKILL_DISABLE_ALL_REGIONS_FAILED skill_id=%s userId=%s request_id=%s",
+                   _ALEXA_SKILL_ID, user_id, request_id)
 
 
 def _revoke_refresh_token(refresh_token: str, user_id: str, request_id: str) -> None:
