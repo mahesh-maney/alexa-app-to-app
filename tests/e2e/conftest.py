@@ -1,6 +1,7 @@
 """
 tests/e2e/conftest.py — Shared fixtures for all E2E tests.
 
+
 Fixtures:
     cfg             EnvConfig for the selected TEST_ENV
     api             requests.Session (shared, no auth)
@@ -21,10 +22,21 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import boto3
 import pytest
 import requests
+
+# Load .env.e2e before anything else so all os.getenv() calls see the values.
+# This avoids shell xargs mangling special characters (!, #, etc.) in passwords.
+_env_file = Path(__file__).parent / ".env.e2e"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 from tests.e2e.config import get_config, test_user_email, test_user_password, test_site_id
 
@@ -46,36 +58,55 @@ def api():
 @pytest.fixture(scope="session")
 def cognito_tokens(cfg):
     """
-    Obtain a real Cognito access + refresh token for the test user.
-    Falls back to TEST_COGNITO_JWT env var if USER_PASSWORD_AUTH is not enabled
-    on the app client.
+    Obtain a Cognito access token with smarthome_server/read+write scopes.
+
+    Preferred path (TEST_COGNITO_REFRESH_TOKEN set in .env.e2e):
+        POST {cognito_domain}/oauth2/token with grant_type=refresh_token.
+        The refresh token is obtained once via the auth-code flow (see
+        tests/e2e/get_cognito_token.py) and stored in .env.e2e.
+
+    Fallback (TEST_COGNITO_JWT set):
+        Use the token directly.
+
+    Why not USER_PASSWORD_AUTH?
+        USER_PASSWORD_AUTH only grants scope 'aws.cognito.signin.user.admin'.
+        The API methods require 'smarthome_server/read' or 'smarthome_server/write'.
+        Only the hosted-UI authorization-code flow yields those resource-server scopes.
     """
     override = os.getenv("TEST_COGNITO_JWT")
     if override:
         return {"AccessToken": override, "RefreshToken": "", "IdToken": ""}
 
-    client = boto3.client("cognito-idp", region_name=cfg.cognito_region)
-    try:
-        resp = client.initiate_auth(
-            AuthFlow="USER_PASSWORD_AUTH",
-            AuthParameters={
-                "USERNAME": test_user_email(),
-                "PASSWORD": test_user_password(),
+    refresh_token = os.getenv("TEST_COGNITO_REFRESH_TOKEN", "")
+    if refresh_token:
+        import requests as _req
+        resp = _req.post(
+            f"https://{cfg.cognito_domain}/oauth2/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": cfg.cognito_client_id,
             },
-            ClientId=cfg.cognito_client_id,
+            timeout=10,
         )
-        return resp["AuthenticationResult"]
-    except client.exceptions.NotAuthorizedException as exc:
-        pytest.fail(
-            f"Cognito login failed for {test_user_email()!r}: {exc}\n"
-            "Check TEST_USER_EMAIL / TEST_USER_PASSWORD are correct."
-        )
-    except Exception as exc:
-        pytest.fail(
-            f"Could not obtain Cognito token: {exc}\n"
-            "If USER_PASSWORD_AUTH is not enabled on the app client, set "
-            "TEST_COGNITO_JWT=<your_access_token> and re-run."
-        )
+        if resp.status_code != 200:
+            pytest.fail(
+                f"Refresh token exchange failed ({resp.status_code}): {resp.text}\n"
+                "Re-run tests/e2e/get_cognito_token.py to get a fresh refresh token."
+            )
+        data = resp.json()
+        return {
+            "AccessToken": data["access_token"],
+            "IdToken": data.get("id_token", ""),
+            "RefreshToken": refresh_token,
+        }
+
+    pytest.fail(
+        "TEST_COGNITO_REFRESH_TOKEN is not set in .env.e2e.\n"
+        "Run: python3 tests/e2e/get_cognito_token.py  to obtain one.\n"
+        "Then add TEST_COGNITO_REFRESH_TOKEN=<value> to tests/e2e/.env.e2e."
+    )
 
 
 @pytest.fixture(scope="session")
@@ -128,7 +159,7 @@ def _gh_unlink(cfg, api, auth_headers):
 def _alexa_unlink(cfg, api, auth_headers, site_id):
     try:
         api.delete(
-            f"{cfg.api_base}/api/alexa/account-linking",
+            f"{cfg.api_base}/api/v1/alexa/unlink",
             params={"siteId": site_id},
             headers=auth_headers,
             timeout=10,
