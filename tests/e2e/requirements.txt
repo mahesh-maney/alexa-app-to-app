@@ -1,0 +1,12 @@
+# E2E test dependencies
+# Install: pip install -r tests/e2e/requirements.txt
+# Browser setup: playwright install chromium
+
+pytest>=7.4
+requests>=2.31
+boto3>=1.34
+python-dotenv>=1.0       # optional: load .env.e2e automatically
+
+# Browser-based flow tests (optional — only needed for @pytest.mark.browser tests)
+playwright>=1.40
+pytest-playwright>=0.4
