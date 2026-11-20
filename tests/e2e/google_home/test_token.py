@@ -30,7 +30,7 @@ pytestmark = pytest.mark.smoke
 
 @pytest.fixture(scope="module")
 def token_url(cfg):
-    return f"{cfg.api_base}/api/google-home/oauth/token"
+    return f"{cfg.api_base}/google-home/oauth/token"
 
 
 @pytest.fixture(scope="module")

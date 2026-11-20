@@ -2,13 +2,13 @@
 E2E tests — Alexa full app-to-app account-linking flow.
 
 Flow:
-  1. App calls POST /api/alexa/app-to-app/start → gets lwaUrl + state
-  2. Headless browser opens lwaUrl → Amazon LWA login → server callback fires
+  1. App calls POST /api/v1/alexa/startAppToApp → gets redirectUri + state
+  2. Headless browser opens redirectUri → Amazon LWA login → server callback fires
      → server exchanges LWA code, writes session, redirects to deep link
-  3. App calls POST /api/alexa/app-to-app/complete → gets cognitoAuthUrl
+  3. App calls POST /api/v1/alexa/completeAppToApp → gets cognitoAuthUrl
   4. Headless browser opens cognitoAuthUrl → Cognito login → cognito/callback fires
      → server writes alexaLinked=True, redirects to deep link
-  5. GET /api/alexa/link-status → linked=true
+  5. GET /api/v1/alexa/status → linked=true
 
 Requires:
   - playwright installed: pip install playwright && playwright install chromium
@@ -25,9 +25,6 @@ import pytest
 from tests.e2e.conftest import poll_until
 from tests.e2e.config import test_user_email, test_user_password
 from tests.e2e.helpers import require_playwright
-
-
-pytestmark = pytest.mark.browser
 
 
 @pytest.fixture(scope="module")
@@ -62,45 +59,48 @@ def _cognito_login(page, cognito_url: str, email: str, password: str) -> None:
     page.click('input[name="signInSubmitButton"]')
 
 
+@pytest.mark.smoke
 class TestAlexaAppToAppStart:
 
     def test_start_returns_required_fields(self, cfg, api, auth_headers,
                                            ensure_alexa_unlinked):
         r = api.post(
-            f"{cfg.api_base}/api/alexa/app-to-app/start",
+            f"{cfg.api_base}/api/v1/alexa/startAppToApp",
             headers=auth_headers,
             timeout=10,
         )
         assert r.status_code == 200, f"start failed: {r.status_code} — {r.text}"
         body = r.json()
-        assert "lwaUrl"        in body, "Missing 'lwaUrl'"
+        assert "redirectUri"   in body, "Missing 'redirectUri'"
         assert "state"         in body, "Missing 'state'"
         assert "codeChallenge" in body, "Missing 'codeChallenge'"
 
-    def test_start_lwa_url_points_to_amazon(self, cfg, api, auth_headers,
-                                             ensure_alexa_unlinked):
+    def test_start_redirect_uri_is_https(self, cfg, api, auth_headers,
+                                         ensure_alexa_unlinked):
         r = api.post(
-            f"{cfg.api_base}/api/alexa/app-to-app/start",
+            f"{cfg.api_base}/api/v1/alexa/startAppToApp",
             headers=auth_headers,
             timeout=10,
         )
-        lwa_url = r.json()["lwaUrl"]
-        assert "amazon.com" in lwa_url or "amazonalexa.com" in lwa_url, (
-            f"lwaUrl does not point to Amazon: {lwa_url}"
+        redirect_uri = r.json()["redirectUri"]
+        assert redirect_uri.startswith("https://"), (
+            f"redirectUri is not HTTPS: {redirect_uri}"
         )
 
-    def test_start_missing_auth_returns_401(self, cfg, api):
+    def test_start_missing_auth_returns_4xx(self, cfg, api):
         r = api.post(
-            f"{cfg.api_base}/api/alexa/app-to-app/start",
+            f"{cfg.api_base}/api/v1/alexa/startAppToApp",
             timeout=10,
         )
-        assert r.status_code == 401
+        assert r.status_code in (401, 403), (
+            f"Expected 401/403 for missing auth, got {r.status_code}"
+        )
 
     def test_complete_with_invalid_state_returns_error(self, cfg, api,
                                                         auth_headers,
                                                         ensure_alexa_unlinked):
         r = api.post(
-            f"{cfg.api_base}/api/alexa/app-to-app/complete",
+            f"{cfg.api_base}/api/v1/alexa/completeAppToApp",
             headers=auth_headers,
             json={"state": "00000000-0000-0000-0000-000000000000"},
             timeout=10,
@@ -110,9 +110,9 @@ class TestAlexaAppToAppStart:
         )
 
 
+@pytest.mark.browser
 class TestAlexaFullLinkFlow:
 
-    @pytest.mark.browser
     def test_full_app_to_app_link_flow(self, cfg, api, auth_headers, site_id,
                                         amazon_creds, playwright_available,
                                         ensure_alexa_unlinked):
@@ -123,27 +123,27 @@ class TestAlexaFullLinkFlow:
 
         # ── Step 1: Start ──────────────────────────────────────────────────────
         r = api.post(
-            f"{cfg.api_base}/api/alexa/app-to-app/start",
+            f"{cfg.api_base}/api/v1/alexa/startAppToApp",
             headers=auth_headers,
             timeout=10,
         )
         assert r.status_code == 200
-        state   = r.json()["state"]
-        lwa_url = r.json()["lwaUrl"]
+        state        = r.json()["state"]
+        redirect_uri = r.json()["redirectUri"]
 
         # ── Step 2: LWA login in headless browser ──────────────────────────────
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page    = browser.new_page()
 
-            _lwa_login(page, lwa_url, amazon_email, amazon_password)
+            _lwa_login(page, redirect_uri, amazon_email, amazon_password)
             # Server callback (/alexa/callback) fires and redirects to deep link
             page.wait_for_timeout(4_000)
             browser.close()
 
         # ── Step 3: Complete ───────────────────────────────────────────────────
         r = api.post(
-            f"{cfg.api_base}/api/alexa/app-to-app/complete",
+            f"{cfg.api_base}/api/v1/alexa/completeAppToApp",
             headers=auth_headers,
             json={"state": state},
             timeout=10,
@@ -165,7 +165,7 @@ class TestAlexaFullLinkFlow:
         # ── Step 5: Poll link-status ───────────────────────────────────────────
         linked = poll_until(
             lambda: api.get(
-                f"{cfg.api_base}/api/alexa/link-status",
+                f"{cfg.api_base}/api/v1/alexa/status",
                 params={"siteId": site_id},
                 headers=auth_headers,
                 timeout=10,

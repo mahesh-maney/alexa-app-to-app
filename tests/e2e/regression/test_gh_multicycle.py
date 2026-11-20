@@ -27,6 +27,7 @@ CYCLES = 5
 
 class TestGhLinkUnlinkStability:
 
+    @pytest.mark.smoke
     def test_unlink_status_cycle_is_stable(self, cfg, api, auth_headers,
                                             ensure_gh_unlinked):
         """
@@ -91,7 +92,7 @@ class TestGhLinkUnlinkStability:
 
             # Exchange auth code
             r = api.post(
-                f"{cfg.api_base}/api/google-home/oauth/token",
+                f"{cfg.api_base}/google-home/oauth/token",
                 data={
                     "grant_type":    "authorization_code",
                     "code":          auth_code,

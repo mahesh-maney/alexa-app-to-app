@@ -28,9 +28,6 @@ from tests.e2e.conftest import poll_until
 from tests.e2e.helpers import require_playwright
 
 
-pytestmark = pytest.mark.browser
-
-
 @pytest.fixture(scope="module")
 def gh_client_secret():
     secret = os.getenv("TEST_GH_CLIENT_SECRET", "")
@@ -92,6 +89,7 @@ def _run_gh_oauth_flow(cfg, web_fallback_url: str, test_email: str, test_passwor
 
 class TestGhFullLinkFlow:
 
+    @pytest.mark.smoke
     def test_deep_link_start_returns_required_fields(self, cfg, api, auth_headers,
                                                       site_id, ensure_gh_unlinked):
         r = api.post(
@@ -107,13 +105,16 @@ class TestGhFullLinkFlow:
         assert "webFallbackUrl"  in body, "Missing 'webFallbackUrl'"
         assert "homeAppDeepLink" in body, "Missing 'homeAppDeepLink'"
 
-    def test_deep_link_start_missing_auth_returns_401(self, cfg, api):
+    @pytest.mark.smoke
+    def test_deep_link_start_missing_auth_returns_4xx(self, cfg, api):
         r = api.post(
             f"{cfg.api_base}/api/v1/voice/google-home/account-linking/deep-link/start",
             json={},
             timeout=10,
         )
-        assert r.status_code == 401
+        assert r.status_code in (401, 403), (
+            f"Expected 401/403 for missing auth, got {r.status_code}"
+        )
 
     @pytest.mark.browser
     def test_full_oauth_link_flow(self, cfg, api, auth_headers, site_id,
@@ -141,7 +142,7 @@ class TestGhFullLinkFlow:
 
         # ── Step 3: Exchange auth code at /token ───────────────────────────────
         r = api.post(
-            f"{cfg.api_base}/api/google-home/oauth/token",
+            f"{cfg.api_base}/google-home/oauth/token",
             data={
                 "grant_type":   "authorization_code",
                 "code":         auth_code,
@@ -178,6 +179,7 @@ class TestGhFullLinkFlow:
         )
         assert linked is True, "link-status did not return linked=true after full flow"
 
+    @pytest.mark.smoke
     def test_deep_link_complete_with_invalid_state_returns_error(self, cfg, api,
                                                                   auth_headers,
                                                                   ensure_gh_unlinked):

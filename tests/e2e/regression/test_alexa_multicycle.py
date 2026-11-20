@@ -37,6 +37,7 @@ def can_run_browser_flow():
 
 class TestAlexaLinkUnlinkStability:
 
+    @pytest.mark.smoke
     def test_unlink_link_status_cycle_is_stable(self, cfg, api, auth_headers,
                                                  site_id, ensure_alexa_unlinked):
         """
@@ -48,7 +49,7 @@ class TestAlexaLinkUnlinkStability:
         for cycle in range(1, CYCLES + 1):
             # Confirm unlinked
             r = api.get(
-                f"{cfg.api_base}/api/alexa/link-status",
+                f"{cfg.api_base}/api/v1/alexa/status",
                 params={"siteId": site_id},
                 headers=auth_headers,
                 timeout=10,
@@ -60,7 +61,7 @@ class TestAlexaLinkUnlinkStability:
 
             # Unlink (idempotent — already unlinked)
             r = api.delete(
-                f"{cfg.api_base}/api/alexa/account-linking",
+                f"{cfg.api_base}/api/v1/alexa/unlink",
                 params={"siteId": site_id},
                 headers=auth_headers,
                 timeout=10,
@@ -69,7 +70,7 @@ class TestAlexaLinkUnlinkStability:
 
             # Status still false
             r = api.get(
-                f"{cfg.api_base}/api/alexa/link-status",
+                f"{cfg.api_base}/api/v1/alexa/status",
                 params={"siteId": site_id},
                 headers=auth_headers,
                 timeout=10,
@@ -103,22 +104,22 @@ class TestAlexaLinkUnlinkStability:
         for cycle in range(1, CYCLES + 1):
             # ── Link ──────────────────────────────────────────────────────────
             r = api.post(
-                f"{cfg.api_base}/api/alexa/app-to-app/start",
+                f"{cfg.api_base}/api/v1/alexa/startAppToApp",
                 headers=auth_headers, timeout=10,
             )
             assert r.status_code == 200, f"Cycle {cycle}: start failed"
             state   = r.json()["state"]
-            lwa_url = r.json()["lwaUrl"]
+            redirect_uri = r.json()["redirectUri"]
 
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page    = browser.new_page()
-                _lwa_login(page, lwa_url, amazon_email, amazon_password)
+                _lwa_login(page, redirect_uri, amazon_email, amazon_password)
                 page.wait_for_timeout(4_000)
                 browser.close()
 
             r = api.post(
-                f"{cfg.api_base}/api/alexa/app-to-app/complete",
+                f"{cfg.api_base}/api/v1/alexa/completeAppToApp",
                 headers=auth_headers, json={"state": state}, timeout=10,
             )
             assert r.status_code == 200, f"Cycle {cycle}: complete failed"
@@ -133,7 +134,7 @@ class TestAlexaLinkUnlinkStability:
 
             linked = poll_until(
                 lambda: api.get(
-                    f"{cfg.api_base}/api/alexa/link-status",
+                    f"{cfg.api_base}/api/v1/alexa/status",
                     params={"siteId": site_id}, headers=auth_headers, timeout=10,
                 ).json().get("linked"),
                 expected=True,
@@ -142,12 +143,12 @@ class TestAlexaLinkUnlinkStability:
 
             # ── Unlink ────────────────────────────────────────────────────────
             api.delete(
-                f"{cfg.api_base}/api/alexa/account-linking",
+                f"{cfg.api_base}/api/v1/alexa/unlink",
                 params={"siteId": site_id}, headers=auth_headers, timeout=10,
             )
             linked = poll_until(
                 lambda: api.get(
-                    f"{cfg.api_base}/api/alexa/link-status",
+                    f"{cfg.api_base}/api/v1/alexa/status",
                     params={"siteId": site_id}, headers=auth_headers, timeout=10,
                 ).json().get("linked"),
                 expected=False,
