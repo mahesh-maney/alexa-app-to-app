@@ -18,6 +18,8 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+tests/e2e/report.html
+tests/e2e/assets/
 
 # Secrets — never commit
 .env

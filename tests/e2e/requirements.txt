@@ -3,6 +3,8 @@
 # Browser setup: playwright install chromium
 
 pytest>=7.4
+pytest-html>=4.0         # HTML report: auto-generated at tests/e2e/report.html
+pytest-metadata>=3.0
 requests>=2.31
 boto3>=1.34
 python-dotenv>=1.0       # optional: load .env.e2e automatically
