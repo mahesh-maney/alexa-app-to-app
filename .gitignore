@@ -31,3 +31,4 @@ lambdas/*/*.zip
 
 # macOS
 .DS_Store
+.env.e2e

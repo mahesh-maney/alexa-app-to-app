@@ -1,5 +1,10 @@
 # Claude Session Context — Digilux App Integration Handoff
 
+> **Current update (2026-11-02):** Read [SESSION_HANDOFF.md](SESSION_HANDOFF.md) first.
+> The historical deployment status and stub descriptions below are outdated.
+> The new handoff records verified Google Home linking/unlinking fixes, deployed
+> source drift, tests, uncommitted changes, and remaining work.
+
 > **How to use this file:**
 > Add this file to your Claude session at the start. Say:
 > _"I'm continuing work on the Digilux app integration. Read this context file and then I'll tell you what to do next."_
