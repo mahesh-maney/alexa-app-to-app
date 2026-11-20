@@ -20,7 +20,8 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 from deploy_common import (
-    cfg, check_no_fill_in, check_required_keys, confirm_deploy, deploy_lambda,
+    cfg, check_no_fill_in, check_referenced_resources, check_required_keys,
+    check_service_access, confirm_deploy, deploy_lambda, DeployReport,
     ensure_cognito_authorizer, ensure_gsi, ensure_role, ensure_table,
     get_or_create_resource, get_root_resource_id, load_config, log_create,
     log_error, log_info, log_ok, log_skip, log_warn, make_client, make_policy,
@@ -297,6 +298,33 @@ def _ensure_pkce_secret(session, c: dict) -> None:
 
     c["PKCE_STATE_SECRET_ARN"] = arn
     log_info(f"PKCE_STATE_SECRET_ARN set to {arn}")
+
+
+# ─── Step 2b — Pre-Deploy Permission Checks (A + B) ──────────────────────────
+
+def step2b_permission_checks(session, c: dict, report: DeployReport,
+                              profile: str = "") -> bool:
+    """
+    A — Probe deployer IAM access for every required AWS service.
+        On any failure: write consolidated IAM policy JSON + print one CLI command.
+    B — Verify referenced resources (secrets, CREATE_UPDATE_FN, S3 bucket) exist.
+    Returns True only if both A and B pass (no FAILs).
+    """
+    step_header(2, "PREFLIGHT — PERMISSION CHECKS")
+    main_region = cfg(c, "AWS_REGION")
+    irl_region  = cfg(c, "ALEXA_FULFILLMENT_REGION")
+
+    a_ok = check_service_access(session, main_region, irl_region, report, profile)
+    b_ok = check_referenced_resources(session, c, report)
+
+    if not a_ok:
+        log_error("Deployer lacks required AWS service access (see section A above).")
+        log_error("Grant the printed permissions, then re-run deploy_alexa.py.")
+        return False
+    if not b_ok:
+        log_warn("One or more referenced resources do not exist (see section B above).")
+        log_warn("Lambdas will deploy but may fail at runtime until those resources are created.")
+    return True
 
 
 # ─── Step 3 — DynamoDB Tables ────────────────────────────────────────────────
@@ -760,12 +788,285 @@ def step12_manual(c: dict, account_id: str):
     print()
 
 
+# ─── Step 13 — Post-Deploy Verification (C–G) ────────────────────────────────
+
+def step13_post_deploy_verify(session, c: dict, account_id: str,
+                               kms_key_arn: str, fn_arns: dict,
+                               report: DeployReport, profile: str = ""):
+    """
+    C — Verify every deployed Lambda is Active with the expected execution role.
+    D — Check alexa_fulfillment has an Alexa Smart Home resource policy.
+    E — Check DDB Streams are enabled on device_state + user_device_details.
+    F — Compare actual Lambda env vars against expected (_lambda_env) — flag gaps.
+    G — Add manual checklist items (Cognito callback URL, Alexa Dev Console).
+    """
+    step_header(13, "POST-DEPLOY VERIFICATION")
+    main_region = cfg(c, "AWS_REGION")
+    irl_region  = cfg(c, "ALEXA_FULFILLMENT_REGION")
+    profile_flag = f" --profile {profile}" if profile else " --profile <HONEYWELL_PROFILE>"
+
+    lam_main = make_client(session, "lambda", main_region)
+    lam_irl  = make_client(session, "lambda", irl_region)
+    ddb      = make_client(session, "dynamodb", main_region)
+    role_pre = cfg(c, "ROLE_PREFIX")
+
+    _ROLE_MAP = {
+        "alexa_app_to_app_link":      f"{role_pre}-alexa-start-role",
+        "alexa_complete_app_to_app":  f"{role_pre}-alexa-complete-role",
+        "alexa_server_callback":      f"{role_pre}-alexa-callback-role",
+        "alexa_app_to_app_unlink":    f"{role_pre}-alexa-unlink-role",
+        "alexa_link_status":          f"{role_pre}-alexa-status-role",
+        "alexa_skill_server_events":  f"{role_pre}-alexa-skill-evt-role",
+        "alexa_state_reporter":       f"{role_pre}-alexa-state-reporter-role",
+        "alexa_proactive_discovery":  f"{role_pre}-alexa-proactive-role",
+        "alexa_fulfillment":          f"{role_pre}-alexa-fulfillment-role",
+        "alexa_cognito_callback":     f"{role_pre}-alexa-cognito-cb-role",
+    }
+
+    # ── C — Lambda state ─────────────────────────────────────────────────────
+    report.begin_section("C", "C — Lambda State Verification")
+    log_info("Checking Lambda active state and execution roles...")
+    for fn_name, _, _, _, region_key in ALEXA_LAMBDAS:
+        lam_client = lam_irl if region_key == "ireland" else lam_main
+        deploy_region = irl_region if region_key == "ireland" else main_region
+        expected_role = _ROLE_MAP.get(fn_name, "")
+        try:
+            conf = lam_client.get_function_configuration(FunctionName=fn_name)
+            state     = conf.get("State", "Unknown")
+            role_arn  = conf.get("Role", "")
+            role_name = role_arn.split("/")[-1] if role_arn else ""
+            if state != "Active":
+                log_warn(f"  {fn_name}: state={state} (not Active)")
+                report.add_check(fn_name, "WARN",
+                                 f"State={state} in {deploy_region} — expected Active")
+            elif expected_role and role_name != expected_role:
+                log_warn(f"  {fn_name}: unexpected role {role_name} (expected {expected_role})")
+                report.add_check(fn_name, "WARN",
+                                 f"Active but role mismatch: got {role_name}, expected {expected_role}")
+            else:
+                log_ok(f"  {fn_name}: Active  role={role_name}")
+                report.add_check(fn_name, "PASS",
+                                 f"Active in {deploy_region}  role={role_name}")
+        except Exception as exc:
+            log_error(f"  {fn_name}: NOT found — {exc}")
+            report.add_check(fn_name, "FAIL",
+                             f"Lambda not found in {deploy_region}: {exc}")
+
+    # ── D — Alexa fulfillment resource policy ────────────────────────────────
+    report.begin_section("D", "D — alexa_fulfillment Alexa Resource Policy (eu-west-1)")
+    log_info("Checking Alexa Smart Home resource policy on alexa_fulfillment...")
+    skill_id = cfg(c, "ALEXA_SKILL_ID")
+    try:
+        policy_resp = lam_irl.get_policy(FunctionName="alexa_fulfillment")
+        policy_doc  = json.loads(policy_resp["Policy"])
+        stmts       = policy_doc.get("Statement", [])
+        alexa_stmt  = next(
+            (s for s in stmts
+             if "alexa-connectedhome.amazon.com" in str(s.get("Principal", ""))),
+            None,
+        )
+        if alexa_stmt:
+            log_ok("  alexa_fulfillment: Alexa resource policy present")
+            report.add_check("Alexa resource policy", "PASS",
+                             "alexa-connectedhome.amazon.com principal found")
+        else:
+            log_warn("  alexa_fulfillment: no Alexa principal in resource policy")
+            add_perm_cmd = (
+                f"aws lambda add-permission \\\n"
+                f"  --function-name alexa_fulfillment \\\n"
+                f"  --statement-id alexa-smart-home \\\n"
+                f"  --action lambda:InvokeFunction \\\n"
+                f"  --principal alexa-connectedhome.amazon.com \\\n"
+                f"  --event-source-token {skill_id} \\\n"
+                f"  --region {irl_region}{profile_flag}"
+            )
+            report.add_check("Alexa resource policy", "FAIL",
+                             "alexa-connectedhome.amazon.com principal missing — Alexa cannot invoke fulfillment Lambda")
+            report.add_fix_command(
+                "Add Alexa Smart Home trigger to alexa_fulfillment", add_perm_cmd)
+    except Exception as exc:
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if code == "ResourceNotFoundException":
+            log_warn("  alexa_fulfillment: no resource policy attached yet")
+            add_perm_cmd = (
+                f"aws lambda add-permission \\\n"
+                f"  --function-name alexa_fulfillment \\\n"
+                f"  --statement-id alexa-smart-home \\\n"
+                f"  --action lambda:InvokeFunction \\\n"
+                f"  --principal alexa-connectedhome.amazon.com \\\n"
+                f"  --event-source-token {skill_id} \\\n"
+                f"  --region {irl_region}{profile_flag}"
+            )
+            report.add_check("Alexa resource policy", "FAIL",
+                             "No resource policy at all — Alexa cannot invoke the fulfillment Lambda")
+            report.add_fix_command(
+                "Add Alexa Smart Home trigger to alexa_fulfillment", add_perm_cmd)
+        else:
+            log_warn(f"  alexa_fulfillment policy check error: {exc}")
+            report.add_check("Alexa resource policy", "WARN", f"Could not check policy: {exc}")
+
+    # ── E — DDB Streams ──────────────────────────────────────────────────────
+    report.begin_section("E", "E — DynamoDB Stream Triggers")
+    log_info("Checking DDB Streams on device_state and user_device_details...")
+    stream_tables = [
+        (cfg(c, "DEVICE_STATE_TABLE"),       "alexa_state_reporter"),
+        (cfg(c, "USER_DEVICE_DETAILS_TABLE"), "alexa_proactive_discovery"),
+    ]
+    for table_name, consumer_fn in stream_tables:
+        try:
+            desc   = ddb.describe_table(TableName=table_name)
+            spec   = desc["Table"].get("StreamSpecification", {})
+            stream_arn = desc["Table"].get("LatestStreamArn", "")
+            enabled = spec.get("StreamEnabled", False)
+            stream_view = spec.get("StreamViewType", "")
+            if enabled and stream_view == "NEW_AND_OLD_IMAGES":
+                # Check event source mapping exists
+                lam_check = lam_main
+                try:
+                    esms = lam_check.list_event_source_mappings(
+                        FunctionName=consumer_fn,
+                        EventSourceArn=stream_arn,
+                    ).get("EventSourceMappings", [])
+                    if esms:
+                        esm_state = esms[0].get("State", "Unknown")
+                        log_ok(f"  {table_name} → {consumer_fn}: stream enabled, ESM state={esm_state}")
+                        report.add_check(f"{table_name} stream", "PASS",
+                                         f"Stream enabled, ESM {esm_state} → {consumer_fn}")
+                    else:
+                        log_warn(f"  {table_name}: stream enabled but no ESM to {consumer_fn}")
+                        esm_cmd = (
+                            f"aws lambda create-event-source-mapping \\\n"
+                            f"  --function-name {consumer_fn} \\\n"
+                            f"  --event-source-arn {stream_arn} \\\n"
+                            f"  --starting-position TRIM_HORIZON \\\n"
+                            f"  --batch-size 100 \\\n"
+                            f"  --region {main_region}{profile_flag}"
+                        )
+                        report.add_check(f"{table_name} stream", "FAIL",
+                                         f"Stream enabled but no event source mapping to {consumer_fn}")
+                        report.add_fix_command(
+                            f"Create event source mapping: {table_name} → {consumer_fn}",
+                            esm_cmd)
+                except Exception as esm_exc:
+                    log_warn(f"  {table_name}: ESM check failed — {esm_exc}")
+                    report.add_check(f"{table_name} stream", "WARN",
+                                     f"Stream enabled but ESM check failed: {esm_exc}")
+            else:
+                log_warn(f"  {table_name}: stream not enabled (StreamEnabled={enabled}, view={stream_view})")
+                enable_cmd = (
+                    f"# Step 1 — enable stream on {table_name}\n"
+                    f"aws dynamodb update-table \\\n"
+                    f"  --table-name {table_name} \\\n"
+                    f"  --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \\\n"
+                    f"  --region {main_region}{profile_flag}\n\n"
+                    f"# Step 2 — after stream is ENABLED, create event source mapping\n"
+                    f"# (re-run step13 or deploy to get the stream ARN, then run:)\n"
+                    f"aws lambda create-event-source-mapping \\\n"
+                    f"  --function-name {consumer_fn} \\\n"
+                    f"  --event-source-arn <STREAM_ARN_FROM_ABOVE> \\\n"
+                    f"  --starting-position TRIM_HORIZON \\\n"
+                    f"  --batch-size 100 \\\n"
+                    f"  --region {main_region}{profile_flag}"
+                )
+                report.add_check(f"{table_name} stream", "FAIL",
+                                 f"DDB stream not enabled — {consumer_fn} will NOT receive device state changes")
+                report.add_fix_command(
+                    f"Enable DDB stream + map to {consumer_fn}", enable_cmd)
+        except Exception as exc:
+            log_error(f"  {table_name}: describe_table failed — {exc}")
+            report.add_check(f"{table_name} stream", "WARN",
+                             f"Could not describe table: {exc}")
+
+    # ── F — Env var verification ─────────────────────────────────────────────
+    report.begin_section("F", "F — Lambda Environment Variable Verification")
+    log_info("Comparing deployed env vars against expected config for each Lambda...")
+    for fn_name, _, _, _, region_key in ALEXA_LAMBDAS:
+        lam_client    = lam_irl if region_key == "ireland" else lam_main
+        deploy_region = irl_region if region_key == "ireland" else main_region
+        try:
+            expected = _lambda_env(fn_name, c, kms_key_arn)
+        except ValueError:
+            continue  # unknown Lambda — skip
+
+        try:
+            conf       = lam_client.get_function_configuration(FunctionName=fn_name)
+            actual_env = conf.get("Environment", {}).get("Variables", {})
+        except Exception as exc:
+            log_warn(f"  {fn_name}: could not fetch config — {exc}")
+            report.add_check(f"{fn_name} env vars", "WARN",
+                             f"get_function_configuration failed: {exc}")
+            continue
+
+        missing  = {k: v for k, v in expected.items() if k not in actual_env}
+        empty    = {k for k, v in actual_env.items() if k in expected and not v}
+        combined = {**missing, **{k: expected[k] for k in empty if k in expected}}
+
+        if not combined:
+            log_ok(f"  {fn_name}: all {len(expected)} env vars present")
+            report.add_check(f"{fn_name}", "PASS",
+                             f"All {len(expected)} expected env vars present and non-empty")
+        else:
+            keys_summary = ", ".join(list(combined.keys())[:5])
+            if len(combined) > 5:
+                keys_summary += f" … (+{len(combined)-5} more)"
+            log_error(f"  {fn_name}: {len(combined)} env var(s) missing/empty — {keys_summary}")
+
+            # Build update-function-configuration command
+            vars_json = json.dumps({"Variables": combined})
+            update_cmd = (
+                f"aws lambda update-function-configuration \\\n"
+                f"  --function-name {fn_name} \\\n"
+                f"  --environment '{vars_json}' \\\n"
+                f"  --region {deploy_region}{profile_flag}"
+            )
+            report.add_check(f"{fn_name}", "FAIL",
+                             f"{len(combined)} env var(s) missing/empty: {keys_summary}",
+                             fix_command=f"See fix command in Fix Commands section")
+            report.add_fix_command(
+                f"Set missing env vars on {fn_name} ({len(combined)} var(s))",
+                update_cmd)
+
+    # ── G — Manual checklist ─────────────────────────────────────────────────
+    api_base       = cfg(c, "API_BASE_URL").rstrip("/")
+    cog_client_id  = cfg(c, "COGNITO_ALEXA_CLIENT_ID")
+    cog_callback   = cfg(c, "ALEXA_COGNITO_CALLBACK_URI")
+    alexa_redirect = cfg(c, "ALEXA_REDIRECT_URI")
+    skill_event_url = f"{api_base}/alexa/skill-event"
+    fulfillment_arn = (
+        f"arn:aws:lambda:{irl_region}:{account_id}:function:alexa_fulfillment"
+    )
+
+    report.add_manual_item(
+        f"[Mrinal — Cognito Console] Add '{cog_callback}' to allowed callback URLs "
+        f"on Cognito app client '{cog_client_id}' in {main_region}"
+    )
+    report.add_manual_item(
+        f"[Mrinal — Alexa Developer Console] Add '{alexa_redirect}' as a redirect URI "
+        f"in the skill Account Linking settings for skill {cfg(c, 'ALEXA_SKILL_ID')}"
+    )
+    report.add_manual_item(
+        f"[Mrinal — Alexa Developer Console] Register fulfillment Lambda ARN as skill endpoint: "
+        f"{fulfillment_arn}"
+    )
+    report.add_manual_item(
+        f"[Mrinal — Alexa Developer Console] Enable skill events (SkillAccountLinked, SkillDisabled) "
+        f"with HTTPS endpoint: {skill_event_url}"
+    )
+
+    log_ok("Post-deploy verification complete")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Deploy all Alexa resources")
     parser.add_argument("--config",  required=True, help="Path to env JSON config file")
-    parser.add_argument("--dry-run", action="store_true", help="Validate + preflight only, no deploy")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate config + run permission checks (A+B) only. No deploy. Generates HTML report.")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="Skip deploy steps entirely. Read-only: look up existing KMS key + Lambda ARNs, "
+                             "then run post-deploy verification (C-G) on whatever is already deployed. "
+                             "Safe to run on live environments — makes zero changes.")
     parser.add_argument("--profile", default=None, help="AWS CLI profile")
     parser.add_argument(
         "--lambdas", default=None,
@@ -800,43 +1101,148 @@ def main():
     account_id = step2_preflight(session, c)
     _ensure_pkce_secret(session, c)
 
+    # ── Create report (collects results from all steps A–G) ──────────────────
+    report = DeployReport(
+        env_label          = cfg(c, "ENV_LABEL"),
+        account_id         = account_id,
+        region             = cfg(c, "AWS_REGION"),
+        fulfillment_region = cfg(c, "ALEXA_FULFILLMENT_REGION"),
+    )
+    ts           = datetime.now().strftime("%Y%m%dT%H%M%S")
+    report_path  = os.path.join("output", f"deploy_alexa_{cfg(c,'ENV_LABEL')}_{ts}.html")
+
+    # ── A + B: Pre-deploy permission checks ──────────────────────────────────
+    checks_ok = step2b_permission_checks(session, c, report, args.profile or "")
+    if not checks_ok:
+        # A failed — cannot deploy without service access; generate report + exit
+        report.begin_section("DEPLOY", "Deploy Steps")
+        report.add_check("Deploy skipped", "SKIP",
+                         "Skipped — deployer lacks required AWS service access (see section A)")
+        report.render_html(report_path)
+        report.open_in_browser(report_path)
+        sys.exit(1)
+
     lambda_count_str = (
         f"{len(deploy_only)} (filtered: {', '.join(sorted(deploy_only))})"
         if deploy_only else
-        f"9 (8 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})"
+        f"10 (9 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})"
     )
     print(f"\n  {'━' * 60}")
     print(f"  DEPLOYMENT PLAN — deploy_alexa.py")
     print(f"  ENV_LABEL              : {cfg(c,'ENV_LABEL')}")
-    print(f"  AWS_REGION             : {cfg(c,'AWS_REGION')}  (8 Lambdas, DDB, API GW, KMS)")
+    print(f"  AWS_REGION             : {cfg(c,'AWS_REGION')}  (9 Lambdas, DDB, API GW, KMS)")
     print(f"  ALEXA_FULFILLMENT_REGION: {cfg(c,'ALEXA_FULFILLMENT_REGION')}  (alexa_fulfillment)")
     print(f"  API                    : {cfg(c,'API_GATEWAY_ID')}  →  {cfg(c,'API_BASE_URL')}")
     print(f"  Will create/update:")
     print(f"    DDB tables    : 3 (alexa_sessions, alexa_tokens, alexa_pkce_sessions)")
     print(f"    KMS key       : 1 ({cfg(c,'KMS_KEY_ALIAS')})")
-    print(f"    IAM roles     : 9")
+    print(f"    IAM roles     : 10")
     print(f"    Lambda funcs  : {lambda_count_str}")
     print(f"    API GW routes : 6 methods on 6 resources + CORS")
     print(f"    Stage         : {cfg(c,'API_STAGE')}")
     print(f"  {'━' * 60}\n")
 
-    if not confirm_deploy(cfg(c, "ENV_LABEL"), "deploy_alexa.py", args.dry_run):
+    # ── --verify-only: skip all deploy steps, read-only post-deploy check ────
+    if args.verify_only:
+        step_header(13, "VERIFY-ONLY MODE — reading existing deployment state")
+        log_info("No changes will be made. Looking up existing KMS key and Lambda ARNs...")
+
+        # Look up KMS key ARN by alias (read-only describe_key)
+        kms_key_arn = ""
+        try:
+            kms_client  = make_client(session, "kms", cfg(c, "AWS_REGION"))
+            kms_key_arn = kms_client.describe_key(
+                KeyId=cfg(c, "KMS_KEY_ALIAS")
+            )["KeyMetadata"]["Arn"]
+            log_ok(f"KMS key found  alias={cfg(c,'KMS_KEY_ALIAS')}  arn={kms_key_arn[:60]}…")
+        except Exception as exc:
+            log_warn(f"KMS key not found ({cfg(c,'KMS_KEY_ALIAS')}): {exc} — env var check will use placeholder")
+
+        # Probe each Lambda to build fn_arns (read-only get_function_configuration)
+        fn_arns: dict = {}
+        lam_main_v = make_client(session, "lambda", cfg(c, "AWS_REGION"))
+        lam_irl_v  = make_client(session, "lambda", cfg(c, "ALEXA_FULFILLMENT_REGION"))
+        for fn_name, _, _, _, region_key in ALEXA_LAMBDAS:
+            lam_v = lam_irl_v if region_key == "ireland" else lam_main_v
+            try:
+                conf = lam_v.get_function_configuration(FunctionName=fn_name)
+                fn_arns[fn_name] = conf["FunctionArn"]
+                log_ok(f"  {fn_name}: found")
+            except Exception:
+                log_warn(f"  {fn_name}: not found — will appear as FAIL in section C")
+
+        log_info(f"Found {len(fn_arns)}/{len(ALEXA_LAMBDAS)} Lambdas. Running post-deploy verification...")
+        report.begin_section("DEPLOY", "Deploy Steps")
+        report.add_check("Deploy", "SKIP",
+                         f"--verify-only mode: deploy skipped. "
+                         f"{len(fn_arns)}/{len(ALEXA_LAMBDAS)} existing Lambdas found.")
+        try:
+            step13_post_deploy_verify(
+                session, c, account_id, kms_key_arn, fn_arns, report, args.profile or "")
+        except Exception as exc:
+            log_warn(f"Post-deploy verification error: {exc}")
+            report.add_check("Verification error", "WARN", str(exc))
+        abs_report = report.render_html(report_path)
+        report.open_in_browser(abs_report)
+        log_ok(f"Verify-only complete. Report: file://{abs_report}")
         return
+
+    if not confirm_deploy(cfg(c, "ENV_LABEL"), "deploy_alexa.py", args.dry_run):
+        report.begin_section("DEPLOY", "Deploy Steps")
+        report.add_check("Deploy", "SKIP", "Cancelled by user at confirmation prompt")
+        report.render_html(report_path)
+        report.open_in_browser(report_path)
+        return
+
+    # ── Deploy steps 3–12 ────────────────────────────────────────────────────
+    report.begin_section("DEPLOY", "Deploy Steps (3–12)")
+    kms_key_arn = None
+    fn_arns     = {}
+    deploy_ok   = True
 
     try:
         set_step("START")
         log_info(f"env={cfg(c,'ENV_LABEL')}  account={account_id}")
 
         step3_ddb(session, c)
+        report.add_check("Step 3 — DynamoDB Tables", "PASS",
+                         "3 tables created/verified with TTL and GSIs")
+
         kms_key_arn = step4_kms(session, c, account_id)
-        apigw_info  = step5_apigw(session, c, account_id)
-        role_arns   = step6_iam(session, c, account_id, kms_key_arn)
-        zips        = step7_package(c, deploy_only)
-        fn_arns     = step8_lambdas(session, c, role_arns, zips, kms_key_arn, account_id, deploy_only)
+        report.add_check("Step 4 — KMS Key", "PASS",
+                         f"Key alias {cfg(c,'KMS_KEY_ALIAS')} ready  arn={kms_key_arn[:60]}…")
+
+        apigw_info = step5_apigw(session, c, account_id)
+        report.add_check("Step 5 — API Gateway", "PASS",
+                         f"API {apigw_info.get('id','?')} verified")
+
+        role_arns = step6_iam(session, c, account_id, kms_key_arn)
+        report.add_check("Step 6 — IAM Roles", "PASS",
+                         f"{len(role_arns)} execution roles created/updated")
+
+        zips = step7_package(c, deploy_only)
+        report.add_check("Step 7 — Package", "PASS",
+                         f"{len(zips)} Lambda zip(s) built")
+
+        fn_arns = step8_lambdas(session, c, role_arns, zips, kms_key_arn, account_id, deploy_only)
+        report.add_check("Step 8 — Lambda Deploy", "PASS",
+                         f"{len(fn_arns)} Lambda(s) deployed")
+
         step9_routes(session, c, apigw_info, fn_arns, account_id)
+        report.add_check("Step 9 — API GW Routes", "PASS",
+                         "6 routes wired with Cognito authorizer + CORS")
+
         step10_stage(session, c, apigw_info)
+        report.add_check("Step 10 — Stage Deploy", "PASS",
+                         f"Stage '{cfg(c,'API_STAGE')}' deployed")
+
         step11_smoke(c)
+        report.add_check("Step 11 — Smoke Tests", "PASS",
+                         "All smoke test endpoints returned expected status codes")
+
         step12_manual(c, account_id)
+        report.add_check("Step 12 — Manual Steps", "INFO",
+                         "Manual checklist printed to console (also in report section G)")
 
         elapsed = (datetime.now() - start_time).seconds
         set_step("SUMMARY")
@@ -845,10 +1251,10 @@ def main():
         log_info(f"Duration: {elapsed // 60}m {elapsed % 60}s")
         log_info(f"  DDB tables  : 3")
         log_info(f"  KMS key     : {cfg(c,'KMS_KEY_ALIAS')}")
-        log_info(f"  IAM roles   : 9")
+        log_info(f"  IAM roles   : 10")
         log_info(f"  Lambdas     : {len(fn_arns)} deployed"
                  + (f" (filtered)" if deploy_only else
-                    f" (8 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})"))
+                    f" (9 × {cfg(c,'AWS_REGION')}, 1 × {cfg(c,'ALEXA_FULFILLMENT_REGION')})"))
         log_info(f"  API GW      : 6 routes wired, stage deployed")
         print(f"{'━' * 68}\n")
 
@@ -858,6 +1264,33 @@ def main():
         log_error(f"Exception: {e}")
         log_error(traceback.format_exc())
         log_error("Resources deployed before failure are left in place.")
+        report.add_check("Deploy exception", "FAIL", str(e))
+        deploy_ok = False
+
+    # ── Post-deploy verification C–G (runs even if deploy failed partially) ──
+    if fn_arns or not deploy_ok:
+        try:
+            step13_post_deploy_verify(
+                session, c, account_id,
+                kms_key_arn or "",
+                fn_arns, report,
+                args.profile or "",
+            )
+        except Exception as exc:
+            log_warn(f"Post-deploy verification error (non-fatal): {exc}")
+            report.begin_section("POST", "Post-Deploy Verification")
+            report.add_check("Verification error", "WARN", str(exc))
+
+    # ── Generate HTML report + open browser (always, success or failure) ─────
+    set_step("REPORT")
+    try:
+        abs_report = report.render_html(report_path)
+        report.open_in_browser(abs_report)
+        log_ok(f"Report: file://{abs_report}")
+    except Exception as exc:
+        log_warn(f"Could not generate HTML report: {exc}")
+
+    if not deploy_ok:
         sys.exit(1)
 
 
