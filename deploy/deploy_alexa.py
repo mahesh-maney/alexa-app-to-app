@@ -607,16 +607,17 @@ def step8_lambdas(session, c: dict, role_arns: dict, zips: dict,
         main_count += 1
 
     log_info(f"\n── Ireland Lambda ──────────────────────────────────────────────────────")
+    fulfillment_fn = cfg(c, "ALEXA_FULFILLMENT_FUNCTION_NAME", "alexa_fulfillment")
     if deploy_only and "alexa_fulfillment" not in deploy_only:
-        log_skip(f"  [SKIP] alexa_fulfillment (not in --lambdas filter)")
+        log_skip(f"  [SKIP] {fulfillment_fn} (not in --lambdas filter)")
     else:
-        log_info(f"Deploying alexa_fulfillment → {irl_region}  timeout=30s  memory=256MB")
+        log_info(f"Deploying {fulfillment_fn} → {irl_region}  timeout=30s  memory=256MB")
         log_info(f"NOTE: DATA_REGION={main_region} — DDB tables live in main region, not Ireland")
         env_vars = _lambda_env("alexa_fulfillment", c, kms_key_arn)
-        arn = deploy_lambda(session, "alexa_fulfillment", zips["alexa_fulfillment"],
+        arn = deploy_lambda(session, fulfillment_fn, zips["alexa_fulfillment"],
                             role_arns[role_map["alexa_fulfillment"]], 30, 256, env_vars, irl_region)
         fn_arns["alexa_fulfillment"] = arn
-        set_log_retention(session, "alexa_fulfillment", irl_region)
+        set_log_retention(session, fulfillment_fn, irl_region)
 
     total_all = len(ALEXA_LAMBDAS)
     skipped   = total_all - len(fn_arns)
@@ -624,7 +625,7 @@ def step8_lambdas(session, c: dict, role_arns: dict, zips: dict,
            f"({main_count} × {main_region}"
            + (f", 1 × {irl_region}" if "alexa_fulfillment" in fn_arns else "")
            + (f", {skipped} skipped" if skipped else "") + ")")
-    log_warn("alexa_fulfillment is NOT wired to API GW — called directly by Alexa Smart Home backend")
+    log_warn(f"{fulfillment_fn} is NOT wired to API GW — called directly by Alexa Smart Home backend")
     return fn_arns
 
 
@@ -751,7 +752,8 @@ def step12_manual(c: dict, account_id: str):
     udd             = cfg(c, "USER_DEVICE_DETAILS_TABLE")
     api_base        = cfg(c, "API_BASE_URL").rstrip("/")
     skill_event_url = f"{api_base}/alexa/skill-event"
-    fulfillment_arn = f"arn:aws:lambda:{irl_region}:{account_id}:function:alexa_fulfillment"
+    fulfillment_fn  = cfg(c, "ALEXA_FULFILLMENT_FUNCTION_NAME", "alexa_fulfillment")
+    fulfillment_arn = f"arn:aws:lambda:{irl_region}:{account_id}:function:{fulfillment_fn}"
 
     log_warn("The following steps CANNOT be automated — complete them manually:\n")
     print(f"  1. Enable DynamoDB stream on {ds} for alexa_state_reporter:")
@@ -766,9 +768,9 @@ def step12_manual(c: dict, account_id: str):
     print(f"       --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \\")
     print(f"       --region {region}")
     print()
-    print(f"  3. Add Alexa Smart Home trigger to alexa_fulfillment in {irl_region}:")
+    print(f"  3. Add Alexa Smart Home trigger to {fulfillment_fn} in {irl_region}:")
     print(f"     aws lambda add-permission \\")
-    print(f"       --function-name alexa_fulfillment \\")
+    print(f"       --function-name {fulfillment_fn} \\")
     print(f"       --statement-id alexa-smart-home \\")
     print(f"       --action lambda:InvokeFunction \\")
     print(f"       --principal alexa-connectedhome.amazon.com \\")
@@ -825,6 +827,8 @@ def step13_post_deploy_verify(session, c: dict, account_id: str,
         "alexa_cognito_callback":     f"{role_pre}-alexa-cognito-cb-role",
     }
 
+    fulfillment_fn = cfg(c, "ALEXA_FULFILLMENT_FUNCTION_NAME", "alexa_fulfillment")
+
     # ── C — Lambda state ─────────────────────────────────────────────────────
     report.begin_section("C", "C — Lambda State Verification")
     log_info("Checking Lambda active state and execution roles...")
@@ -832,8 +836,10 @@ def step13_post_deploy_verify(session, c: dict, account_id: str,
         lam_client = lam_irl if region_key == "ireland" else lam_main
         deploy_region = irl_region if region_key == "ireland" else main_region
         expected_role = _ROLE_MAP.get(fn_name, "")
+        # Use configurable name for the fulfillment Lambda (may differ per env, e.g. "alexa")
+        aws_fn_name = fulfillment_fn if fn_name == "alexa_fulfillment" else fn_name
         try:
-            conf = lam_client.get_function_configuration(FunctionName=fn_name)
+            conf = lam_client.get_function_configuration(FunctionName=aws_fn_name)
             state     = conf.get("State", "Unknown")
             role_arn  = conf.get("Role", "")
             role_name = role_arn.split("/")[-1] if role_arn else ""
@@ -855,11 +861,11 @@ def step13_post_deploy_verify(session, c: dict, account_id: str,
                              f"Lambda not found in {deploy_region}: {exc}")
 
     # ── D — Alexa fulfillment resource policy ────────────────────────────────
-    report.begin_section("D", "D — alexa_fulfillment Alexa Resource Policy (eu-west-1)")
-    log_info("Checking Alexa Smart Home resource policy on alexa_fulfillment...")
+    report.begin_section("D", f"D — {fulfillment_fn} Alexa Resource Policy ({irl_region})")
+    log_info(f"Checking Alexa Smart Home resource policy on {fulfillment_fn}...")
     skill_id = cfg(c, "ALEXA_SKILL_ID")
     try:
-        policy_resp = lam_irl.get_policy(FunctionName="alexa_fulfillment")
+        policy_resp = lam_irl.get_policy(FunctionName=fulfillment_fn)
         policy_doc  = json.loads(policy_resp["Policy"])
         stmts       = policy_doc.get("Statement", [])
         alexa_stmt  = next(
