@@ -193,8 +193,8 @@ def ensure_gsi(ddb, table_name: str, gsi_name: str, pk_attr: str):
         }}],
     )
     log_info(f"Waiting for GSI {gsi_name} to become ACTIVE...")
-    for _ in range(40):
-        time.sleep(5)
+    for attempt in range(72):  # 72 × 10s = 12 minutes max
+        time.sleep(10)
         try:
             d2 = ddb.describe_table(TableName=table_name)["Table"]
             for g in d2.get("GlobalSecondaryIndexes", []):
@@ -203,7 +203,12 @@ def ensure_gsi(ddb, table_name: str, gsi_name: str, pk_attr: str):
                     return
         except ClientError:
             pass
-    log_warn(f"GSI {gsi_name} may not be ACTIVE yet — check manually")
+        if attempt % 6 == 5:
+            log_info(f"  still waiting for {gsi_name}... ({(attempt + 1) * 10}s elapsed)")
+    raise RuntimeError(
+        f"GSI {gsi_name} on {table_name} did not become ACTIVE within 12 minutes. "
+        f"Check DynamoDB console and re-run deploy once ACTIVE."
+    )
 
 
 # ─── IAM ──────────────────────────────────────────────────────────────────────
