@@ -114,6 +114,7 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "SMAPI_LINKING_ENABLED":    cfg(c, "SMAPI_LINKING_ENABLED"),
                 "PKCE_TABLE":               cfg(c, "ALEXA_PKCE_TABLE"),
                 "COGNITO_ALEXA_CLIENT_ID":  cfg(c, "COGNITO_ALEXA_CLIENT_ID"),
+                "COGNITO_ALEXA_SCOPES":     cfg(c, "COGNITO_ALEXA_SCOPES", "openid"),
                 "COGNITO_HOSTED_UI_DOMAIN": cfg(c, "COGNITO_HOSTED_UI_DOMAIN"),
                 "COGNITO_CALLBACK_URI":     cfg(c, "ALEXA_COGNITO_CALLBACK_URI"),
                 "PKCE_STATE_SECRET_ARN":    cfg(c, "PKCE_STATE_SECRET_ARN"),
