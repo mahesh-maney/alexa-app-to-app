@@ -100,6 +100,7 @@ _SMAPI_LINKING_ENABLED      = os.environ.get("SMAPI_LINKING_ENABLED", "").lower(
 _PKCE_TABLE                 = os.environ.get("PKCE_TABLE",               "")
 _PKCE_TTL_SECONDS           = int(os.environ.get("PKCE_TTL_SECONDS",     "600"))
 _COGNITO_ALEXA_CLIENT_ID    = os.environ.get("COGNITO_ALEXA_CLIENT_ID",  "")
+_COGNITO_ALEXA_SCOPES       = os.environ.get("COGNITO_ALEXA_SCOPES",     "openid")
 _COGNITO_HOSTED_UI_DOMAIN   = os.environ.get("COGNITO_HOSTED_UI_DOMAIN", "")
 _COGNITO_CALLBACK_URI       = os.environ.get("COGNITO_CALLBACK_URI",     "")
 _PKCE_STATE_SECRET_ARN      = os.environ.get("PKCE_STATE_SECRET_ARN",    "")
@@ -472,7 +473,7 @@ def _build_cognito_auth_url(challenge: str, signed_state: str) -> str:
     params = urllib.parse.urlencode({
         "client_id":             _COGNITO_ALEXA_CLIENT_ID,
         "response_type":         "code",
-        "scope":                 "openid",
+        "scope":                 _COGNITO_ALEXA_SCOPES,
         "redirect_uri":          _COGNITO_CALLBACK_URI,
         "state":                 signed_state,
         "code_challenge":        challenge,
