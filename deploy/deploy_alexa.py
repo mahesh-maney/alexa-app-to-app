@@ -208,7 +208,6 @@ def _lambda_env(fn_name: str, c: dict, kms_key_arn: str) -> dict:
                 "KMS_KEY_ARN":             kms_key_arn,
                 "COGNITO_HOSTED_UI_DOMAIN": cfg(c, "COGNITO_HOSTED_UI_DOMAIN"),
                 "COGNITO_ALEXA_CLIENT_ID": cfg(c, "COGNITO_ALEXA_CLIENT_ID"),
-                "COGNITO_CLIENT_SECRET":   cfg(c, "COGNITO_CLIENT_SECRET"),
                 "COGNITO_CALLBACK_URI":    cfg(c, "ALEXA_COGNITO_CALLBACK_URI"),
                 "PKCE_STATE_SECRET_ARN":   cfg(c, "PKCE_STATE_SECRET_ARN"),
                 "PKCE_STATE_SECRET_REGION": cfg(c, "PKCE_STATE_SECRET_REGION"),
